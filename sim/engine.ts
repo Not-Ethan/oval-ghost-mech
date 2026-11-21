@@ -78,6 +78,7 @@ export class Sim {
   onTick: ((sim: Sim) => void) | null = null
   sampleExtra: ((id: number) => any) | null = null
   deathLog: any[] = []
+  healOnKill = false // oracle experiment: our mech is fully healed on each kill
   record(id: number, e: any) { const r = this.rec.get(id); if (r) r.push({ t: Math.round(this.t * 100) / 100, ...e }) }
 
   constructor(w: World, nav: Nav, cfg: any, seed: number, ctrls: Controller[]) {
@@ -293,6 +294,7 @@ export class Sim {
     if (by >= 0 && by < 16 && by !== m.id) { this.mechs[by].kills++; this.mechs[by].events.push({ type: "kill", target: m.id }) }
     this.deathLog.push({ t: Math.round(this.t * 10) / 10, id: m.id, name: m.ctrl.name, by, byName: by >= 0 && by < 16 ? this.mechs[by].ctrl.name : by >= 100 ? "npc" : (m as any).lastHitW === "zone" ? "zone" : "self-" + (m as any).lastHitW })
     if (this.track.has(m.id)) this.record(m.id, { e: "death", by, byName: by >= 0 && by < 16 ? this.mechs[by].ctrl.name : by >= 100 ? "npc" : "zone", alive: this.aliveCount })
+    if (this.healOnKill && by >= 0 && by < 16 && this.track.has(by)) this.mechs[by].hp = this.stats(this.mechs[by]).s.hp
     if (by >= 0 && by < 16 && this.track.has(by)) this.record(by, { e: "kill", victim: m.id, victimName: m.ctrl.name, myHp: Math.round(this.mechs[by].hp), victimCubes: m.cubes, victimWeapons: m.weapons.filter((w) => w).map((w) => w!.kind) })
     const n = m.cubes + this.cfg.cubes.death_drop_extra
     for (let i = 0; i < n; i++) this.cubes.push({ id: this.nextId.cube++, x: m.x + (this.R() - 0.5) * 6, y: m.y + (this.R() - 0.5) * 6, z: m.z, src: "mech" })

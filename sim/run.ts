@@ -86,6 +86,7 @@ for (let k = 0; k < N; k++) {
   for (const i of ours) {
     if (args.giveWeapon) sim.mechs[i].weapons[1] = sim.newWeapon(args.giveWeapon)
     if (args.giveCubes) sim.giveCubes(sim.mechs[i], Number(args.giveCubes))
+    if (args.healOnKill) sim.healOnKill = true
   }
   // practice: our score is fixed once we are dead, so stop there (use --full to play the match out)
   if (mode === "practice" && !args.full) sim.stopWhenTrackedDead = true

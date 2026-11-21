@@ -42,10 +42,9 @@ const LOADOUTS: Record<string, Record<string, number>> = {
     "laser+lightning": 7, "laser+mortar": 5, "lightning+mortar": 3.5,
   },
 }
-let LOADOUT = LOADOUTS.old
-function loadoutValue(a: string | null, b: string | null): number {
+function loadoutValue(a: string | null, b: string | null, table: Record<string, number> = LOADOUTS.old): number {
   const k = [a ?? "", b ?? ""].sort().join("+")
-  return LOADOUT[k] ?? 0
+  return table[k] ?? 0
 }
 
 export type BrainOpts = { world?: World; nav?: Nav; mapDir?: string; debug?: boolean; params?: Partial<Params> }
@@ -94,6 +93,7 @@ export type Params = {
   lootBoost: boolean // boost (energy permitting) while walking to a laser or harvesting
   scanEvery: number // with no enemy seen for 8 s, sweep the torso through a full circle every this many seconds (0 = off)
   laserDodge: boolean // a visible enemy charging a laser aimed at us: break line of sight (evade) until it fires or stops
+  laserSafe: boolean // laserHunt also holds off for enemies seen in the last 3 s (not only visible ones) and recent damage
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -140,6 +140,7 @@ export const DEFAULT_PARAMS: Params = {
   lootBoost: false,
   scanEvery: 0,
   laserDodge: false,
+  laserSafe: false,
 }
 
 export class Brain {
@@ -224,7 +225,6 @@ export class Brain {
       }
     }
     this.P = { ...DEFAULT_PARAMS, ...fileParams, ...(opts.params ?? {}) }
-    LOADOUT = LOADOUTS[this.P.loadout] ?? LOADOUTS.old
     if (opts.world) this.w = opts.world
     if (opts.nav) this.nav = opts.nav
     this.debugOn = !!opts.debug
@@ -450,7 +450,8 @@ export class Brain {
     let dry = !gunReady && !laserReady && !ltgReady
     // light pressure (one shooter, little damage): breaking line of sight to reload costs more uptime than it saves
     if (dry && this.P.dryHold && visible.length <= 1 && recentDmg < maxHp * 0.08 && hpFrac > 0.5) dry = false
-    if (!dest && this.P.laserHunt && !me.weapons.some((w: any) => w && w.kind === "laser") && hpFrac > 0.45 && !visible.some((tr) => hyp(tr.x - x, tr.y - y) < this.P.laserNear)) {
+    const nearFoes = this.P.laserSafe ? threats.filter((tr) => this.t - tr.lastSeen < 3) : visible
+    if (!dest && this.P.laserHunt && !me.weapons.some((w: any) => w && w.kind === "laser") && hpFrac > 0.45 && !nearFoes.some((tr) => hyp(tr.x - x, tr.y - y) < this.P.laserNear) && !(this.P.laserSafe && this.t - this.lastDamagedT < 2)) {
       const lp = this.laserGoal(o)
       if (lp) { dest = lp; why = "laser" }
     }
@@ -1217,15 +1218,16 @@ export class Brain {
   takeGain(me: any, kind: string): [number, number] {
     const w0 = me.weapons[0]?.kind ?? null, w1 = me.weapons[1]?.kind ?? null
     if (w0 === kind || w1 === kind) return [0, -1]
-    const cur = loadoutValue(w0, w1)
+    const T = LOADOUTS[this.P.loadout] ?? LOADOUTS.old
+    const cur = loadoutValue(w0, w1, T)
     let best = 0, slot = -2
-    if (!me.weapons[0]) { const g = loadoutValue(kind, w1) - cur; if (g > best) { best = g; slot = -1 } }
-    if (!me.weapons[1]) { const g = loadoutValue(w0, kind) - cur; if (g > best) { best = g; slot = -1 } }
+    if (!me.weapons[0]) { const g = loadoutValue(kind, w1, T) - cur; if (g > best) { best = g; slot = -1 } }
+    if (!me.weapons[1]) { const g = loadoutValue(w0, kind, T) - cur; if (g > best) { best = g; slot = -1 } }
     for (const sl of [0, 1]) {
       const w = me.weapons[sl]
       if (!w) continue
       if (w.kind === "laser" && (w.charge ?? 0) > 0) continue
-      const g = loadoutValue(sl === 0 ? kind : w0, sl === 1 ? kind : w1) - cur
+      const g = loadoutValue(sl === 0 ? kind : w0, sl === 1 ? kind : w1, T) - cur
       if (g > best + 0.01) { best = g; slot = sl }
     }
     return slot === -2 ? [0, -1] : [best, slot]
