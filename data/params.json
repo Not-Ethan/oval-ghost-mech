@@ -1,1 +1,1 @@
-{"lootMem": true, "laserHunt": true, "laserNear": 0, "laserHp": 0.25, "harvest": true, "mortarUse": true, "loadout": "gun", "upg": "dmg", "dryHold": true, "leadAdapt": true}
+{"lootMem": true, "laserHunt": true, "harvest": true, "mortarUse": true, "loadout": "gun", "upg": "dmg", "dryHold": true, "leadAdapt": true, "rangeW": 0.15}

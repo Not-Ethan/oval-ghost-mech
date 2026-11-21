@@ -11,7 +11,7 @@ let seed = 12345
 const rnd = () => { seed = (seed * 1103515245 + 12345) >>> 0; return seed / 4294967296 }
 const gauss = () => { let u = 0, v = 0; while (u === 0) u = rnd(); while (v === 0) v = rnd(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(TAU * v) }
 
-type Mode = "strafe" | "straight" | "jitter"
+type Mode = "strafe" | "straight" | "jitter" | string // "juke:<min>:<var>" = our dodge: walk speed, reversal every min..min+var s
 function run(model: string, range: number, mode: Mode): number {
   const b = new Brain({ params: { leadAdapt: true, leadMC: true, leadMCMean: model === "mcmean" } }) as any
   b.cfg = { mech: { ground_accel: 58.5 } }
@@ -26,6 +26,7 @@ function run(model: string, range: number, mode: Mode): number {
     const t = tick * dt
     // target motion
     if (mode === "strafe" && t >= nextRev) { want = -want; nextRev = t + 0.4 + rnd(); speed = 8 + rnd() * 8 }
+    if (mode.startsWith("juke:") && t >= nextRev) { const [, mn, vr] = mode.split(":").map(Number); want = rnd() < 0.5 ? -1 : 1; nextRev = t + mn + rnd() * vr; speed = 11.7 }
     if (mode === "jitter" && t >= nextRev) { want = rnd() < 0.5 ? -1 : 1; nextRev = t + 0.2 + rnd() * 2.5; speed = 6 + rnd() * 10 }
     const dirx = -tx / Math.hypot(tx, ty), diry = -ty / Math.hypot(tx, ty) // toward shooter
     const latx = -diry, laty = dirx
@@ -89,10 +90,11 @@ function run(model: string, range: number, mode: Mode): number {
   return hits / Math.max(1, shots)
 }
 
-for (const mode of ["strafe", "jitter", "straight"] as Mode[]) {
+const MODES = process.env.BENCH_MODES ? process.env.BENCH_MODES.split(",") : ["strafe", "jitter", "straight"]
+for (const mode of MODES as Mode[]) {
   console.log(`== target: ${mode}`)
   for (const range of [50, 75, 100, 125, 150, 175]) {
-    const row = ["full", "adapt0.6", "adapt", "adapt1.5", "adapt2.2"].map((m) => { seed = 12345 + range; return `${m} ${(100 * run(m, range, mode)).toFixed(1)}%` })
+    const row = (process.env.BENCH_MODELS ?? "full,adapt").split(",").map((m) => { seed = 12345 + range; return `${m} ${(100 * run(m, range, mode)).toFixed(1)}%` })
     console.log(`  ${String(range).padStart(3)} m: ${row.join("  ")}`)
   }
 }
