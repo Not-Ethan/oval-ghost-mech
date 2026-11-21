@@ -84,7 +84,23 @@ Later tests on top of C4 (paired, 200 seeds):
 | laserCrates | −0.07 / 0.00 |
 | roof lasers | +0.07 / +0.06; possession unchanged, 56% → 57% |
 
-## Built on C10 (real 4.71, the best so far): kill conversion
+## Noise correction (coordinator, 11:05)
+
+C10 resubmitted unchanged scored 3.88 (first run 4.71). One real 48-match run has an SD of about
+0.3–0.4. Everything after C2 (C3–C13: 3.88–4.75) sits inside one band around 4.3–4.4. Only
+defaults 3.04 → C1 3.83 → C2 4.29 is clearly real. The "positioning loses, kill conversion wins"
+reading is not established. The paired sim (±0.1–0.15 at 200 seeds) is therefore the finer
+instrument for small effects, and real runs should only test bundles expected to be worth ≥ +0.4,
+with about 3 repeats each.
+
+**Plan for 12 real runs (3 hours):**
+1. Runs 1–3: **B1** (below; all changes that were non-negative across the sim models, stacked
+   on C2). Mean ≥ ~4.8 over 3 runs (vs the ~4.35 band) means a real step up.
+2. Runs 4–6: if B1 looks up, keep running it (the best single run counts). If it's flat, run
+   **B1 minus the movement items** (kite, chase) ×3, to see whether movement is what hurts.
+3. Runs 7–12: the commit with the best 3-run mean, repeated for the best single run.
+
+## Built on C10 (real 4.71 / 3.88): kill conversion
 
 Real results for C7–C10: C7 kite 4.29, C8 longer range 4.27, C9 exposure weight 4.38, **C10
 targetHit 4.71**. Positioning changes in either direction lost; shot-to-kill conversion won (C4 aim,
