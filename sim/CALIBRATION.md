@@ -65,7 +65,21 @@ Each residual is under 0.11, inside the sim's own noise. A real 48-match score p
 | C1 (`lootMem` + `laserHunt`) vs defaults | +0.79 (3.83) | +0.36 ± 0.16 | +0.35 ± 0.18 | +0.41 ± 0.16 | +0.17 ± 0.16 |
 | C2 vs C1 (harvest, mortarUse, gun loadout, dmg upgrades, dryHold) | +0.46 (4.29) | +0.28 ± 0.18 | +0.38 ± 0.18 | +0.38 ± 0.16 | n/a |
 
-The sim got the sign right both times but underrated the size. It underrated laser value by about 2×.
+Later points (sim figures are the paired A/B against the parent config):
+
+| Candidate | Real | Sim |
+| --- | --- | --- |
+| C4 = C2 + leadAdapt | 4.54 (+0.25) | +0.05 to +0.10 (strafing M1s), −0.04 to −0.07 (M1) |
+| C3 = C2 + upg auto + wider laser hunt | 4.15 (−0.14) | +0.00 (M1), −0.10 (M1s) |
+| C5 = C4 + laserNear 0, laserHp 0.25 | 4.31 (−0.23) | +0.13 (M1), +0.10 (M1s) |
+
+Real run-to-run noise is not yet measured; the coordinator offered to resubmit C4 unchanged. With a
+per-submission noise of about ±0.2, C3 and C5 are unresolved. C4's aim gain was about 3× the strafing
+model's estimate, consistent with real gun duels happening at longer range than in the sim (the
+shooting gallery, `sim/aimbench.ts`, gives leadAdapt +5 to +8 hit-rate points at 100–150 m against a
+stream-like strafer).
+
+For C1 and C2 the sim got the sign right but underrated the size. It underrated laser value by about 2×.
 M1r (long-range, laser-armed hunters) is further off, so it is not a better model of laser value.
 Working rule: treat sim gains as direction and rough size, expect real gains of about 1.3–2× for
 laser and power-growth changes, and keep M1 and M1s as the main models. A plausible reason:
