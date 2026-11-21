@@ -7,7 +7,10 @@ M1b (vision-only hunters) and M1s (strafing hunters). All three are calibrated t
 
 Real results so far: C1 = **3.83** (+0.79 vs defaults 3.04; sim said +0.36), C2 = **4.29** (+0.46 vs C1;
 sim said +0.28 to +0.38), C4 = **4.54** (+0.25 vs C2; sim said +0.05 to +0.10 against strafers and
-−0.07 against non-strafers), C3 = **4.15** (C2 was 4.29), C5 = **4.31** (C4 was 4.54). The sim
+−0.07 against non-strafers), C3 = **4.15** (C2 was 4.29), C5 = **4.31** (C4 was 4.54), C6 = **4.02**
+(C4 was 4.54). Three single changes in a row came in 0.14–0.52 below their parent. Until the
+unchanged-C4 resubmission measures run-to-run spread, treat real differences under about 0.3 as
+unresolved. If C6's −0.52 holds up, closing to 75 m with the gun is genuinely harmful in reality. The sim
 got C1, C2 and C4 right in direction but was conservative (1.3–2× for lasers and power, about 3×
 for aim against strafers). It got C3 and C5 (small laser-hunt and upgrade tweaks) wrong in sign,
 or they are within real noise. Real run-to-run noise is unknown: our slot and spawn vary between
