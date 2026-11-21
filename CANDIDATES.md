@@ -6,7 +6,9 @@ M1b (vision-only hunters) and M1s (strafing hunters). All three are calibrated t
 `sim/CALIBRATION.md`. Real scores go in `SUBMISSIONS.md` on main.
 
 Real results so far: C1 = **3.83** (+0.79 vs defaults 3.04; sim said +0.36), C2 = **4.29** (+0.46 vs C1;
-sim said +0.28 to +0.38). The sim is directionally right and conservative by about 1.3–2×.
+sim said +0.28 to +0.38), C4 = **4.54** (+0.25 vs C2; sim said +0.05 to +0.10 against strafers and
+−0.07 against non-strafers). The sim gets the direction right but is conservative: 1.3–2× for
+lasers and power, about 3× for aim against strafers.
 
 | # | Commit | What changed | Sim vs defaults (M1 / M1b / M1s) | Real-score hypothesis it tests |
 | --- | --- | --- | --- | --- |

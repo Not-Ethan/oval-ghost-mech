@@ -113,6 +113,8 @@ export type Params = {
   kite: number // fight spots: reward moving away from the centroid of the other recent threats (strings out a pack; 0 = off)
   laserHp: number // laserHunt only above this HP fraction
   scoutT: number // until this match time, with no laser known and no enemy visible: walk to the most open spot within ~60 m and sweep (0 = off)
+  leadMC: boolean // gun lead from sampled strafe futures (pooled reversal intervals, time since the target's last reversal, accel limit); aim at the window with the most samples
+  fireMinP: number // with leadMC: fire the gun only when the estimated hit chance of the shot is at least this (0 = off)
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -172,6 +174,8 @@ export const DEFAULT_PARAMS: Params = {
   kite: 0,
   laserHp: 0.45,
   scoutT: 0,
+  leadMC: false,
+  fireMinP: 0,
 }
 
 export class Brain {
@@ -196,6 +200,7 @@ export class Brain {
   laserFullSince = -1
   crateGoal: any = null
   scoutSpot: number[] | null = null
+  flipIntervals: number[] = []
   scoutSweepT = -1
   sweepYaw0 = 0
   lastTargetT = -99
@@ -636,12 +641,17 @@ export class Brain {
       if (o.t - tr.lastSeen > 1) { tr.firstSeen = o.t; tr.seenStreak = 0 }
       tr.x = m.pos[0]; tr.y = m.pos[1]; tr.z = m.pos[2]
       tr.vx = m.vel[0]; tr.vy = m.vel[1]; tr.vz = m.vel[2]
-      if (this.P.leadAdapt) {
+      if (this.P.leadAdapt || this.P.leadMC) {
         // a reversal: horizontal velocity now points against the velocity ~0.3 s ago (both moving)
         const r = tr.rev ?? (tr.rev = { t: o.t, vx: tr.vx, vy: tr.vy, flips: [] })
         if (o.t - r.t >= 0.3) {
           const sp0 = hyp(r.vx, r.vy), sp1 = hyp(tr.vx, tr.vy)
-          if (sp0 > 3 && sp1 > 3 && (r.vx * tr.vx + r.vy * tr.vy) / (sp0 * sp1) < -0.3) r.flips.push(o.t)
+          if (sp0 > 3 && sp1 > 3 && (r.vx * tr.vx + r.vy * tr.vy) / (sp0 * sp1) < -0.3) {
+            const prev = r.flips.length ? r.flips[r.flips.length - 1] : -99
+            r.flips.push(o.t)
+            const iv = o.t - prev
+            if (iv > 0.25 && iv < 4) { this.flipIntervals.push(iv); if (this.flipIntervals.length > 80) this.flipIntervals.shift() }
+          }
           r.t = o.t; r.vx = tr.vx; r.vy = tr.vy
           while (r.flips.length && o.t - r.flips[0] > 8) r.flips.shift()
         }
@@ -1647,7 +1657,12 @@ export class Brain {
       const f = h * tf > 1e-3 ? (1 - Math.exp(-2 * h * tf)) / (2 * h * tf) : 1
       leadVel = [tgtVel[0] * f, tgtVel[1] * f, tgtVel[2]]
     }
-    const lead = this.intercept(ox, oy, oz, tgtPt, leadVel, gs, (me.weapons[slotGun]?.stats?.range ?? 230))
+    let lead = this.intercept(ox, oy, oz, tgtPt, leadVel, gs, (me.weapons[slotGun]?.stats?.range ?? 230))
+    let hitP = 1
+    if (this.P.leadMC && target && target.rev && isMech) {
+      const mc = this.leadMC(ox, oy, oz, tgtPt, tgtVel, target, gs, tgtR)
+      lead = mc.pt; hitP = mc.p
+    }
     let aimYaw = Math.atan2(lead[1] - oy, lead[0] - ox)
     let aimPitch = Math.atan2(lead[2] - oz, hyp(lead[0] - ox, lead[1] - oy))
 
@@ -1714,7 +1729,7 @@ export class Brain {
     if (slotGun >= 0 && shotOk && dist < (me.weapons[slotGun].stats?.range ?? 230) * 0.95) {
       const g = me.weapons[slotGun]
       const maxGunRange = isMech ? this.P.maxGunRange : 120
-      if (err < tol + slewTick * this.P.fireSlack && dist < maxGunRange && g.reload <= 0 && !mortarAiming) a.fire[slotGun] = true
+      if (err < tol + slewTick * this.P.fireSlack && dist < maxGunRange && g.reload <= 0 && !mortarAiming && !(isMech && this.P.fireMinP > 0 && hitP < this.P.fireMinP)) a.fire[slotGun] = true
       if (g.ammo === 0 && g.reload <= 0) a.reload = true
     }
     if (slotLight >= 0 && shotOk) {
@@ -1723,6 +1738,58 @@ export class Brain {
       const yawErr = Math.abs(wrap(curYaw - Math.atan2(tgtPt[1] - oy, tgtPt[0] - ox)))
       if (dist < rng - 2 && yawErr < 0.2 && me.energy > 8) a.fire[slotLight] = true
     }
+  }
+
+  // Sampled strafe futures: lateral motion (across our line of fire) reverses after intervals drawn from the pooled
+  // observed reversal intervals (prior U[0.4,1.4] s), conditioned on the time since this target's last reversal;
+  // velocity changes are limited by ground acceleration. Radial motion is linear. Returns the aim point at the centre of
+  // the target-width window holding the most samples, and that window's share (estimated hit chance).
+  leadMC(ox: number, oy: number, oz: number, p: number[], v: number[], tr: Track, speed: number, R: number): { pt: number[]; p: number } {
+    const dx = p[0] - ox, dy = p[1] - oy
+    const dh = hyp(dx, dy) || 1
+    const ux = dx / dh, uy = dy / dh, lx = -uy, ly = ux
+    const vr = v[0] * ux + v[1] * uy, vl = v[0] * lx + v[1] * ly
+    let tf = hyp(dx, dy, p[2] - oz) / speed
+    tf = hyp(dh + vr * tf, p[2] - oz) / speed + 0.05
+    tf = Math.min(tf, 1.2)
+    const pool = this.flipIntervals
+    const usePool = pool.length >= 8
+    const drawI = () => (usePool ? pool[Math.floor(this.rand() * pool.length)] : 0.4 + this.rand())
+    const flips = tr.rev!.flips
+    const age = flips.length ? Math.max(0, this.t - flips[flips.length - 1] - 0.15) : -1
+    const meanI = usePool ? pool.reduce((a, b) => a + b, 0) / pool.length : 0.9
+    const acc = (this.cfg?.mech?.ground_accel ?? 58.5) * 0.05 // per 0.05 s step
+    const K = 40, dt = 0.05
+    const xs = new Float64Array(K)
+    for (let k = 0; k < K; k++) {
+      let tnext: number
+      if (age < 0) tnext = -Math.log(1 - this.rand() * 0.999) * meanI
+      else {
+        tnext = Infinity
+        for (let tries = 0; tries < 12; tries++) { const I = drawI(); if (I > age) { tnext = I - age; break } }
+      }
+      let pos = 0, vel = vl, want = vl, t = 0
+      while (t < tf - 1e-9) {
+        if (t >= tnext) { want = -want; tnext += drawI() }
+        const d = want - vel
+        vel += d > acc ? acc : d < -acc ? -acc : d
+        const step = Math.min(dt, tf - t)
+        pos += vel * step
+        t += step
+      }
+      xs[k] = pos
+    }
+    xs.sort()
+    const wdt = R * 1.8
+    let bestN = 0, bestC = xs[K >> 1], j = 0
+    for (let i = 0; i < K; i++) {
+      while (xs[i] - xs[j] > wdt) j++
+      const n = i - j + 1
+      if (n > bestN) { bestN = n; bestC = (xs[i] + xs[j]) / 2 }
+    }
+    const lat = bestC
+    const pt = [p[0] + ux * vr * tf + lx * lat, p[1] + uy * vr * tf + ly * lat, p[2] + clamp(v[2], -3, 3) * tf * 0.3]
+    return { pt, p: bestN / K }
   }
 
   intercept(ox: number, oy: number, oz: number, p: number[], v: number[], speed: number, range: number): number[] {
