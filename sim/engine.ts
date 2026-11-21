@@ -76,6 +76,7 @@ export class Sim {
   rec = new Map<number, any[]>()
   stopWhenTrackedDead = false
   onTick: ((sim: Sim) => void) | null = null
+  sampleExtra: ((id: number) => any) | null = null
   deathLog: any[] = []
   record(id: number, e: any) { const r = this.rec.get(id); if (r) r.push({ t: Math.round(this.t * 100) / 100, ...e }) }
 
@@ -817,7 +818,8 @@ export class Sim {
           if (o.seen.get(m.id) === this.t) seenBy++
         }
         const inZ = Math.hypot(m.x - zn.cx, m.y - zn.cy) <= zn.r
-        this.record(id, { e: "s", hp: Math.round(m.hp), max: Math.round(s.hp), cubes: m.cubes, ups: m.upgrades.length, w: m.weapons.map((w) => w ? w.kind[0] : "-").join(""), regen: inZ && this.t - m.lastCombat >= s.regen_delay ? 1 : 0, seenBy, alive: this.aliveCount, pos: [Math.round(m.x), Math.round(m.y)] })
+        const extra = this.sampleExtra ? this.sampleExtra(id) : {}
+        this.record(id, { ...extra, e: "s", hp: Math.round(m.hp), max: Math.round(s.hp), cubes: m.cubes, ups: m.upgrades.length, w: m.weapons.map((w) => w ? w.kind[0] : "-").join(""), regen: inZ && this.t - m.lastCombat >= s.regen_delay ? 1 : 0, seenBy, alive: this.aliveCount, pos: [Math.round(m.x), Math.round(m.y)] })
       }
     }
     this.onTick?.(this)

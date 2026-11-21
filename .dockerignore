@@ -5,3 +5,4 @@ check
 arena
 *.md
 node_modules
+src/brain_v*.ts

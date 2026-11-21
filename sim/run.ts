@@ -23,8 +23,8 @@ if (args.nonpc) cfg.npc.count = 0
 
 async function makeBot(kind: string, paramsJson: string | undefined = args.params): Promise<Controller> {
   if (kind === "example") return new ExampleBot()
-  const mod = await import("../src/brain.ts")
-  const b = new mod.Brain({ world: w, nav, debug: verbose && paramsJson === args.params, params: paramsJson ? JSON.parse(paramsJson) : undefined })
+  const mod = await import(args.brain ? new URL("../" + args.brain, import.meta.url).href : "../src/brain.ts")
+  const b = new mod.Brain({ world: w, nav, debug: verbose && paramsJson === args.params, params: paramsJson ? JSON.parse(paramsJson) : {} })
   lastBrains.push(b)
   return { name: "mine", squad: false, hello: (h: any) => { if (args.record) recLines.push(JSON.stringify(h)); b.hello(h) }, end: (m: any) => { if (args.record) recLines.push(JSON.stringify(m)) }, act: (o: any) => { if (args.record) recLines.push(JSON.stringify(o)); const r = b.act(o); if (verbose && b.dbg.length) console.log(b.dbg.join("\n")); return r } }
 }
@@ -33,6 +33,7 @@ const scores: number[] = []
 const ffaB: number[] = []
 const lastBrains: any[] = []
 const recLines: string[] = []
+const traceOut: any[] = []
 let maxMs = 0
 const allRes: any[] = []
 for (let k = 0; k < N; k++) {
@@ -81,8 +82,31 @@ for (let k = 0; k < N; k++) {
   const sim = new Sim(w, nav, cfg, seed, ctrls)
   sim.verbose = verbose
   for (const i of ours) { sim.track.add(i); sim.rec.set(i, []) }
+  // oracle experiments: what is a resource worth? (--giveWeapon=laser, --giveCubes=5)
+  for (const i of ours) {
+    if (args.giveWeapon) sim.mechs[i].weapons[1] = sim.newWeapon(args.giveWeapon)
+    if (args.giveCubes) sim.giveCubes(sim.mechs[i], Number(args.giveCubes))
+  }
   // practice: our score is fixed once we are dead, so stop there (use --full to play the match out)
   if (mode === "practice" && !args.full) sim.stopWhenTrackedDead = true
+  if (args.trace) {
+    const tr: any[] = []
+    const brain0 = lastBrains[0]
+    sim.onTick = (S: any) => {
+      if (S.tick % 10) return
+      tr.push({ t: Math.round(S.t * 10) / 10, mode: brain0?.mode ?? "", tgt: brain0?.lastTargetId ?? -1, m: S.mechs.filter((m: any) => m.alive).map((m: any) => [m.id, Math.round(m.x * 10) / 10, Math.round(m.y * 10) / 10, Math.round(m.hp), m.ctrl.name, sq && sq.hunters.has(m.id) ? 1 : 0, Math.round(m.yaw * 100) / 100]) })
+    }
+    traceOut.push({ seed, ours, frames: tr })
+  }
+  if (sq) {
+    const brain = lastBrains[0]
+    const S = sq
+    sim.sampleExtra = (id: number) => {
+      const me = sim.mechs[id]
+      const hd = [...S.hunters].map((h) => sim.mechs[h]).filter((m) => m && m.alive).map((m) => Math.round(Math.hypot(m.x - me.x, m.y - me.y))).sort((a, b) => a - b)
+      return { mode: brain?.mode ?? "", tgt: brain?.lastTargetId ?? -1, hunters: hd.length, hd: hd.slice(0, 6), ammo: me.weapons[0]?.ammo ?? -1 }
+    }
+  }
   if (sq) sq.oracle = () => sim.mechs.filter((m) => m.alive && !m.ctrl.squad).map((m) => ({ id: m.id, pos: [m.x, m.y, m.z], vel: [m.vx, m.vy, m.vz] }))
   const res = sim.run()
   const ms = performance.now() - t0
@@ -107,6 +131,7 @@ for (let k = 0; k < N; k++) {
   const hk = res.places.map((p, i) => i).filter((i) => !ours.includes(i))
   console.log(`match ${k} seed ${seed}: place ${ours.map((i) => res.places[i]).join(",")} kills ${ours.map((i) => res.kills[i]).join(",")} death ${ours.map((i) => res.deathT[i].toFixed(0)).join(",")} dealt ${res.dmgDealt[i0]} taken ${res.dmgTaken[i0]} | end t=${res.t.toFixed(0)} houseDead=${hk.filter((i) => res.deathT[i] >= 0).length} acc ${res.acc[i0]} houseAcc ${hk.map((i) => res.acc[i]).filter((a) => !a.startsWith('0/0')).slice(0, 4).join(' ')} (${(ms / 1000).toFixed(1)}s) act avg ${avgMs.toFixed(2)}ms max ${maxMs.toFixed(1)}ms`)
 }
+if (args.trace) writeFileSync(args.trace, JSON.stringify(traceOut))
 if (args.record) { writeFileSync(args.record, gzipSync(recLines.join("\n") + "\n")); console.log(`recorded ${recLines.length} lines to ${args.record}`) }
 const mean = scores.reduce((a, b) => a + b, 0) / scores.length
 console.log(`MEAN score ${mean.toFixed(2)} over ${scores.length}` + (ffaB.length ? ` | B mean ${(ffaB.reduce((a, b) => a + b, 0) / ffaB.length).toFixed(2)}` : ""))

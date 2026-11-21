@@ -16,6 +16,7 @@ type Track = {
   hp: number; maxHp: number; weapons: string[]; charging: boolean; aimYaw: number; aimPitch: number
   lastSeen: number; firstSeen: number; visible: boolean; cubes: number; seenStreak: number
   lastShotAtUs: number
+  rev?: { t: number; vx: number; vy: number; flips: number[] } // velocity reversal history (adaptive lead)
 }
 
 type Cand = { x: number; y: number; z: number; c: number; score: number; dist: number; exp: number }
@@ -28,14 +29,23 @@ const UPGRADE_PRIOS: Record<string, string[]> = {
 const UPGRADE_PRIO = ["armor", "plating", "nanites", "gun_damage", "laser_damage", "gun_rate", "laser_charge", "lightning_efficiency", "servos", "gyros", "gun_velocity", "capacitor", "reactor", "jets", "lightning_range", "gun_mag", "sensors", "lightning_chain", "mortar_reload", "mortar_velocity", "mortar_splash", "laser_pierce"]
 const WEAPON_PRIO: Record<string, number> = { laser: 3, lightning: 2, mortar: 1, gun: 0 }
 // value of a two-slot loadout (order irrelevant)
-function loadoutValue(a: string | null, b: string | null): number {
-  const k = [a ?? "", b ?? ""].sort().join("+")
-  const V: Record<string, number> = {
+const LOADOUTS: Record<string, Record<string, number>> = {
+  old: {
     "+": 0, "+gun": 1, "+laser": 2.5, "+lightning": 2, "+mortar": 1,
     "gun+laser": 7, "gun+lightning": 6.5, "gun+mortar": 3.5,
     "laser+lightning": 9, "laser+mortar": 4.5, "lightning+mortar": 4,
-  }
-  return V[k] ?? 0
+  },
+  // keep the gun: house hunters fight from ~65-100 m, outside lightning range
+  gun: {
+    "+": 0, "+gun": 1, "+laser": 2.5, "+lightning": 2, "+mortar": 1,
+    "gun+laser": 9, "gun+lightning": 6, "gun+mortar": 4,
+    "laser+lightning": 7, "laser+mortar": 5, "lightning+mortar": 3.5,
+  },
+}
+let LOADOUT = LOADOUTS.old
+function loadoutValue(a: string | null, b: string | null): number {
+  const k = [a ?? "", b ?? ""].sort().join("+")
+  return LOADOUT[k] ?? 0
 }
 
 export type BrainOpts = { world?: World; nav?: Nav; mapDir?: string; debug?: boolean; params?: Partial<Params> }
@@ -66,6 +76,22 @@ export type Params = {
   harvestMaxVis: number // ... with at most this many visible enemies within 120 m
   harvestHp: number // ... and HP fraction above this
   harvestS: number // seconds after the kill the harvest stays a goal
+  attackersOnly: boolean // engage only mechs that shot us recently (or are very close / charging at us), plus kills to finish
+  focus: number // target stickiness: score bonus for the current target (0 = off)
+  dryHold: boolean // reloading with nothing else to fire: stay in the fight (strafe) when incoming damage is light
+  rangeW: number // weight of the preferred-range term when choosing a fighting spot
+  loadout: string // weapon loadout table: "old" (laser+lightning best) or "gun" (gun+laser best)
+  mortarUse: boolean // fire the mortar whenever it is ready (leading the target), swinging the torso off the gun aim
+  leadAdapt: boolean // scale gun lead by the expected travel of a target that reverses direction (rate estimated per track)
+  jukeMin: number // dodge: minimum seconds between random strafe reversals
+  jukeVar: number // dodge: extra random seconds between reversals
+  jukeW: number // dodge: weight of the strafe against the path direction while moving
+  peek: number // fight spots: bonus for seeing the target with a fully hidden spot within 9 m (0 = off)
+  lootMem: boolean // remember weapon pickups seen earlier and walk to them when nothing threatens
+  laserHunt: boolean // without a laser: go for a remembered ground laser (needs lootMem) unless an enemy is close
+  laserR: number // ... within this distance
+  laserNear: number // ... and no visible enemy within this distance
+  lootBoost: boolean // boost (energy permitting) while walking to a laser or harvesting
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -94,6 +120,22 @@ export const DEFAULT_PARAMS: Params = {
   harvestMaxVis: 1,
   harvestHp: 0.3,
   harvestS: 30,
+  attackersOnly: false,
+  focus: 0,
+  dryHold: false,
+  rangeW: 0.02,
+  loadout: "old",
+  mortarUse: false,
+  leadAdapt: false,
+  jukeMin: 0.35,
+  jukeVar: 0.6,
+  jukeW: 0.55,
+  peek: 0,
+  lootMem: false,
+  laserHunt: false,
+  laserR: 250,
+  laserNear: 70,
+  lootBoost: false,
 }
 
 export class Brain {
@@ -108,10 +150,13 @@ export class Brain {
   tracks = new Map<number, Track>()
   npcs = new Map<number, any>()
   crates = new Map<number, { x: number; y: number; z: number; hp: number; t: number; since: number }>()
+  pickMem = new Map<number, { id: number; kind: string; pos: number[]; t: number }>()
   farmId = -1
   farmSince = 0
   farmBan = new Set<number>()
   harvests: { x: number; y: number; z: number; t: number }[] = []
+  lastTargetId = -1
+  lastTargetT = -99
   // movement
   path: number[] | null = null
   pathGoal: number[] | null = null
@@ -173,6 +218,7 @@ export class Brain {
       }
     }
     this.P = { ...DEFAULT_PARAMS, ...fileParams, ...(opts.params ?? {}) }
+    LOADOUT = LOADOUTS[this.P.loadout] ?? LOADOUTS.old
     if (opts.world) this.w = opts.world
     if (opts.nav) this.nav = opts.nav
     this.debugOn = !!opts.debug
@@ -279,7 +325,7 @@ export class Brain {
     this.dest = null; this.destT = -99; this.hold = null; this.holdKey = ""; this.stuckT = 0; this.mode = "init"
     this.dmgWindow = []; this.threatBearings = []; this.sounds = []; this.lastDamagedT = -99; this.lastDealtT = -99
     this.dfieldT = -99; this.timeStats = { n: 0, max: 0, sum: 0 }; this.jukeT = 0; this.scanT = 0; this.scanStartYaw = null; this.recovering = false; this.npcAggro = null; this.hpHist.clear(); this.directMode = false
-    this.crates.clear(); this.harvests = []; this.farmId = -1; this.farmBan.clear(); this.relocTarget = null; this.relocUntil = 0; this.relocT = -99; this.ffaEvidence = 0; this.ffaDetectedAt = -1; this.ourHits.clear()
+    this.crates.clear(); this.pickMem.clear(); this.harvests = []; this.farmId = -1; this.farmBan.clear(); this.relocTarget = null; this.relocUntil = 0; this.relocT = -99; this.ffaEvidence = 0; this.ffaDetectedAt = -1; this.ourHits.clear()
   }
 
   // ------------------------------------------------------------------ helpers
@@ -395,7 +441,13 @@ export class Brain {
     const laserReady = lasW && lasW.cooldown <= 0.3
     const ltgReady = ltgW && me.energy > 15 && target && hyp(target.x - x, target.y - y) < 40
     const gunReady = !!gunW && gunW.reload <= 0.5 && (gunW.ammo ?? 1) > 0
-    const dry = !gunReady && !laserReady && !ltgReady
+    let dry = !gunReady && !laserReady && !ltgReady
+    // light pressure (one shooter, little damage): breaking line of sight to reload costs more uptime than it saves
+    if (dry && this.P.dryHold && visible.length <= 1 && recentDmg < maxHp * 0.08 && hpFrac > 0.5) dry = false
+    if (!dest && this.P.laserHunt && !me.weapons.some((w: any) => w && w.kind === "laser") && hpFrac > 0.45 && !visible.some((tr) => hyp(tr.x - x, tr.y - y) < this.P.laserNear)) {
+      const lp = this.laserGoal(o)
+      if (lp) { dest = lp; why = "laser" }
+    }
     if (!dest && this.P.harvest && this.harvests.length) {
       const h = this.harvestGoal(o, visible, hpFrac)
       if (h) { dest = h; why = "harvest" }
@@ -471,13 +523,13 @@ export class Brain {
     }
     // juke when visible enemies can shoot us
     if (engaged && why !== "zone") {
-      if (this.t > this.jukeT) { this.jukeDir = this.rand() < 0.5 ? -1 : 1; this.jukeT = this.t + 0.35 + this.rand() * 0.6 }
+      if (this.t > this.jukeT) { this.jukeDir = this.rand() < 0.5 ? -1 : 1; this.jukeT = this.t + this.P.jukeMin + this.rand() * this.P.jukeVar }
       const ref = target ?? visible[0]
       const ang = Math.atan2(ref.y - y, ref.x - x) + (this.jukeDir * Math.PI) / 2
       const jx = Math.cos(ang), jy = Math.sin(ang)
       const ok = this.nav.clearanceAt(x + jx * 4, y + jy * 4) > 2.9
       if (ok) {
-        const wgt = hyp(mv[0], mv[1]) > 0.1 ? 0.55 : 1
+        const wgt = hyp(mv[0], mv[1]) > 0.1 ? this.P.jukeW : 1
         mv = [mv[0] * (1 - wgt) + jx * wgt, mv[1] * (1 - wgt) + jy * wgt]
       } else this.jukeDir *= -1
     }
@@ -491,6 +543,7 @@ export class Brain {
     // boost: zone emergencies and evasion
     const energy = me.energy
     if ((urgent && (!me.in_zone || zoneInfo.slack < 8) && energy > 10) || (why === "evade" && energy > 35 && ml > 0.5)) a.boost = true
+    if (this.P.lootBoost && (why === "laser" || why === "harvest") && dest && hyp(dest[0] - x, dest[1] - y) > 25 && energy > 45 && ml > 0.5) a.boost = true
 
     // stuck handling
     this.handleStuck(o, a, ml)
@@ -524,6 +577,16 @@ export class Brain {
       if (o.t - tr.lastSeen > 1) { tr.firstSeen = o.t; tr.seenStreak = 0 }
       tr.x = m.pos[0]; tr.y = m.pos[1]; tr.z = m.pos[2]
       tr.vx = m.vel[0]; tr.vy = m.vel[1]; tr.vz = m.vel[2]
+      if (this.P.leadAdapt) {
+        // a reversal: horizontal velocity now points against the velocity ~0.3 s ago (both moving)
+        const r = tr.rev ?? (tr.rev = { t: o.t, vx: tr.vx, vy: tr.vy, flips: [] })
+        if (o.t - r.t >= 0.3) {
+          const sp0 = hyp(r.vx, r.vy), sp1 = hyp(tr.vx, tr.vy)
+          if (sp0 > 3 && sp1 > 3 && (r.vx * tr.vx + r.vy * tr.vy) / (sp0 * sp1) < -0.3) r.flips.push(o.t)
+          r.t = o.t; r.vx = tr.vx; r.vy = tr.vy
+          while (r.flips.length && o.t - r.flips[0] > 8) r.flips.shift()
+        }
+      }
       if (typeof m.hp === "number") tr.hp = m.hp
       if (typeof m.max_hp === "number") tr.maxHp = m.max_hp
       tr.weapons = m.weapons ?? tr.weapons
@@ -540,6 +603,19 @@ export class Brain {
       while (hh.length && o.t - hh[0].t > 4) hh.shift()
     }
     for (const [id, n] of this.npcs) if (o.t - n.t > 10) this.npcs.delete(id)
+    if (this.P.lootMem) {
+      const seenP = new Set<number>()
+      for (const p of o.pickups ?? []) { if (p && Array.isArray(p.pos)) { seenP.add(p.id); this.pickMem.set(p.id, { id: p.id, kind: p.kind, pos: p.pos, t: o.t }) } }
+      const [px, py, pz] = o.self.pos
+      const pez = pz + (o.self.stats?.eye_height ?? 8)
+      for (const [id, p] of this.pickMem) {
+        if (seenP.has(id)) continue
+        if (o.t - p.t > 90) { this.pickMem.delete(id); continue }
+        const d = hyp(p.pos[0] - px, p.pos[1] - py)
+        if (d < 35 && this.w.sees(px, py, pez, p.pos[0], p.pos[1], p.pos[2] + 0.5, false)) this.pickMem.delete(id)
+      }
+      for (const e of o.events ?? []) if (e.type === "took" || e.type === "take_failed") this.pickMem.delete(e.id)
+    }
     // crate memory: crates are listed only while seen; forget one we should see from close by but do not
     const listed = new Set<number>()
     for (const c of o.crates ?? []) {
@@ -863,12 +939,24 @@ export class Brain {
         if (target) {
           const d = hyp(cd.x - target.x, cd.y - target.y)
           const pref = this.preferredRange(o)
-          s -= Math.abs(d - pref) * 0.02
+          s -= Math.abs(d - pref) * this.P.rangeW
         }
       }
       s += this.coverScore(cd.c) * 1.5 - (this.P.rearAware ? arcPen : 0)
       if (this.P.cubeGrab && o.cubes?.length) for (const cu of o.cubes) if (hyp(cu.pos[0] - cd.x, cu.pos[1] - cd.y) < 3.2 && Math.abs(cu.pos[2] - cd.z) < 3) s += 1.5
+      cd.score = s
+      ;(cd as any).ev = 1
       if (s > bs) { bs = s; best = cd }
+    }
+    if (this.P.peek && !evade && target) {
+      // a firing spot next to full cover: reloads and laser charges can break line of sight with a short step
+      bs = -Infinity
+      for (const cd of cands) {
+        if (!(cd as any).ev) continue
+        let s = cd.score
+        if (cd.exp > 0) for (const q of cands) if ((q as any).ev && q.exp === 0 && hyp(q.x - cd.x, q.y - cd.y) < 9) { s += this.P.peek; break }
+        if (s > bs) { bs = s; best = cd }
+      }
     }
     return [best.x, best.y]
   }
@@ -920,8 +1008,12 @@ export class Brain {
   isThreatening(o: any, tr: Track): boolean {
     const [x, y] = o.self.pos
     const d = hyp(tr.x - x, tr.y - y)
-    if (this.t - tr.lastShotAtUs < 6) return true
+    if (this.t - tr.lastShotAtUs < (this.P.attackersOnly ? 10 : 6)) return true
     if (d < 50) return true
+    if (this.P.attackersOnly) {
+      const b = Math.atan2(y - tr.y, x - tr.x)
+      return tr.charging && Math.abs(wrap(tr.aimYaw - b)) < 0.2 && d < 290
+    }
     const bearingToUs = Math.atan2(y - tr.y, x - tr.x)
     const aimed = Math.abs(wrap(tr.aimYaw - bearingToUs)) < 0.2
     if (tr.charging && aimed && d < 290) return true
@@ -934,6 +1026,7 @@ export class Brain {
     const [x, y, z] = o.self.pos
     const d = hyp(tr.x - x, tr.y - y)
     const frac = tr.hp / Math.max(1, tr.maxHp)
+    if (this.P.attackersOnly) return frac < 0.35 && d < 150
     // being damaged by someone else (third party)?
     const hist = this.hpHist.get(tr.id)
     const dropping = !!hist && hist.length > 1 && hist[0].hp - tr.hp > 100 && this.t - this.lastDealtT > 2
@@ -973,7 +1066,23 @@ export class Brain {
       if (this.P.rearAware) s -= rear * 3
       // shootable?
       if (!this.w.shotClear(x, y, z + 7, tr.x, tr.y, tr.z + 4.5)) s -= 6
+      if (this.P.focus && tr.id === this.lastTargetId && this.t - this.lastTargetT < 1.5) s += this.P.focus
       if (s > bs) { bs = s; best = tr }
+    }
+    return best
+  }
+
+  // nearest remembered laser on the ground (not on a roof) that stays inside the zone
+  laserGoal(o: any): number[] | null {
+    const [x, y, z] = o.self.pos
+    const zf = this.zoneAt(o, this.t + 15)
+    let best: number[] | null = null, bd = this.P.laserR
+    for (const p of this.pickMem.values()) {
+      if (p.kind !== "laser") continue
+      if (Math.abs(p.pos[2] - this.nav.surfAt(p.pos[0], p.pos[1])) > 2.5) continue
+      if (hyp(p.pos[0] - zf.cx, p.pos[1] - zf.cy) > zf.r - 10) continue
+      const d = hyp(p.pos[0] - x, p.pos[1] - y)
+      if (d < bd) { bd = d; best = [p.pos[0], p.pos[1]] }
     }
     return best
   }
@@ -1033,6 +1142,7 @@ export class Brain {
     const muz = z + (me.stats?.muzzle_height ?? 7)
     const close = isNpc ? 45 : 26
     if (d < close && this.w.shotClear(x, y, muz, best[0], best[1], isNpc ? this.npcs.get(bid).pos[2] + 1.75 : this.crates.get(bid)!.z + 1.2)) return [x, y]
+    if (best) { this.lastTargetId = best.id; this.lastTargetT = this.t }
     return best
   }
 
@@ -1065,7 +1175,7 @@ export class Brain {
       return bc
     }
     let best: number[] | null = null, bs = -Infinity
-    for (const p of o.pickups ?? []) {
+    for (const p of this.P.lootMem ? this.pickMem.values() : o.pickups ?? []) {
       const [gain] = this.takeGain(me, p.kind)
       if (gain < 0.4) continue
       if (Math.abs(p.pos[2] - this.nav.surfAt(p.pos[0], p.pos[1])) > 2.5) continue // roof loot: skip
@@ -1336,7 +1446,16 @@ export class Brain {
 
     // gun lead
     const gs = slotGun >= 0 ? me.weapons[slotGun].stats?.speed ?? 252 : 252
-    const lead = this.intercept(ox, oy, oz, tgtPt, tgtVel, gs, (me.weapons[slotGun]?.stats?.range ?? 230))
+    let leadVel = tgtVel
+    if (this.P.leadAdapt && target && target.rev) {
+      // flip rate over the last up-to-8 s of tracking (prior: one flip per 4 s), expected travel over the flight time
+      const span = Math.max(2, Math.min(8, this.t - target.firstSeen))
+      const h = (target.rev.flips.length + 0.5) / (span + 2)
+      const tf = dist / gs
+      const f = h * tf > 1e-3 ? (1 - Math.exp(-2 * h * tf)) / (2 * h * tf) : 1
+      leadVel = [tgtVel[0] * f, tgtVel[1] * f, tgtVel[2]]
+    }
+    const lead = this.intercept(ox, oy, oz, tgtPt, leadVel, gs, (me.weapons[slotGun]?.stats?.range ?? 230))
     let aimYaw = Math.atan2(lead[1] - oy, lead[0] - ox)
     let aimPitch = Math.atan2(lead[2] - oz, hyp(lead[0] - ox, lead[1] - oy))
 
@@ -1368,12 +1487,23 @@ export class Brain {
 
     if (laserPriority && laserAim) { aimYaw = laserAim[0]; aimPitch = laserAim[1] }
     // mortar: only for slow/stationary targets at mid range when no laser in progress
-    if (!laserPriority && slotMortar >= 0 && isMech && dist > 25 && dist < 220) {
+    let mortarAiming = false
+    if (!laserPriority && slotMortar >= 0 && isMech && dist > 25 && dist < 220 && (!this.P.mortarUse || shotOk)) {
       const mw = me.weapons[slotMortar]
       const sp = hyp(tgtVel[0], tgtVel[1])
-      if (mw.cooldown <= 0 && sp < 6) {
-        const sol = this.mortarSolve(x, y, z + (st.height ?? 9) + 0.5, tgtPt[0], tgtPt[1], tgtPt[2] - 3.5, mw.stats?.speed ?? 72, mw.stats?.gravity ?? 22)
-        if (sol && slotGun < 0) { aimYaw = sol[0]; aimPitch = sol[1] }
+      if (mw.cooldown <= 0 && (sp < 6 || this.P.mortarUse)) {
+        const v = mw.stats?.speed ?? 72, g = mw.stats?.gravity ?? 22, mz = z + (st.height ?? 9) + 0.5
+        let px = tgtPt[0], py = tgtPt[1]
+        let sol = this.mortarSolve(x, y, mz, px, py, tgtPt[2] - 3.5, v, g)
+        if (this.P.mortarUse) {
+          // lead the impact point by a damped share of the target's velocity (strafers reverse often)
+          for (let it = 0; it < 3 && sol; it++) {
+            const tf = hyp(px - x, py - y) / Math.max(1, v * Math.cos(sol[1]))
+            px = tgtPt[0] + tgtVel[0] * tf * 0.6; py = tgtPt[1] + tgtVel[1] * tf * 0.6
+            sol = this.mortarSolve(x, y, mz, px, py, tgtPt[2] - 3.5, v, g)
+          }
+        }
+        if (sol && (slotGun < 0 || this.P.mortarUse)) { aimYaw = sol[0]; aimPitch = sol[1]; mortarAiming = slotGun >= 0 }
         if (sol && Math.abs(wrap(curYaw - sol[0])) < 0.03 && Math.abs(curPitch - sol[1]) < 0.03) a.fire[slotMortar] = true
       }
     }
@@ -1389,7 +1519,7 @@ export class Brain {
     if (slotGun >= 0 && shotOk && dist < (me.weapons[slotGun].stats?.range ?? 230) * 0.95) {
       const g = me.weapons[slotGun]
       const maxGunRange = isMech ? this.P.maxGunRange : 120
-      if (err < tol + slewTick * this.P.fireSlack && dist < maxGunRange && g.reload <= 0) a.fire[slotGun] = true
+      if (err < tol + slewTick * this.P.fireSlack && dist < maxGunRange && g.reload <= 0 && !mortarAiming) a.fire[slotGun] = true
       if (g.ammo === 0 && g.reload <= 0) a.reload = true
     }
     if (slotLight >= 0 && shotOk) {

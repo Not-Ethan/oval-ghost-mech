@@ -2,3 +2,4 @@ node_modules/
 *.log
 *.cpuprofile
 /tmp/
+src/brain_v*.ts

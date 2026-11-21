@@ -33,7 +33,7 @@ export const HP = {
   easyLoot: env("H_EASY_LOOT", 0),
   // H_MOVE=1: movement like the enemy in the recorded real stream (check/stream.jsonl.gz): strafes at
   // walk/boost speed across the line of fire, reverses every 0.4-1.4 s, closes in slowly (about +2 m/s)
-  move: env("H_MOVE", 0), moveEasy: env("H_MOVE_EASY", 0.7), moveBoost: env("H_MOVE_BOOST", 0.35),
+  range: env("H_RANGE", 0), move: env("H_MOVE", 0), moveEasy: env("H_MOVE_EASY", 0.7), moveBoost: env("H_MOVE_BOOST", 0.35),
 }
 export const SKILLS: Record<string, Skill> = {}
 for (const k of Object.keys(BASE)) {
@@ -149,7 +149,8 @@ export class HouseBot implements Controller {
     let goal: number[] | null = null
     const hasLaser = me.weapons.some((w: any) => w && w.kind === "laser")
     const hasLightning = me.weapons.some((w: any) => w && w.kind === "lightning")
-    const wantRange = hasLightning ? 30 : hasLaser ? 100 : 65
+    // H_RANGE=1: longer fighting ranges, like the laser-armed enemy in the real stream (150 m, closing slowly)
+    const wantRange = hasLightning ? 30 : HP.range ? (hasLaser ? 140 : 90) : hasLaser ? 100 : 65
     const mustZone = curD > zn.radius - 15 || (o.t > zn.shrink_start - 15 && !inNext)
     if (pursue && !mustZone) {
       const ez = Math.hypot(tgt.pos[0] - zn.center[0], tgt.pos[1] - zn.center[1])
