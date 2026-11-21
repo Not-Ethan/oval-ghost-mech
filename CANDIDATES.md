@@ -96,8 +96,16 @@ C10 target choice). Positioning stays as in C4.
 | 12 | 93f299b | **`upg: "mag"`**: gun_mag first (+8 rounds, −20% reload, about +31% sustained gun DPS), then plating, then gun_damage. C10 uses `"dmg"`, which puts gun_damage (+15%) first. | +0.07 ± 0.09 (M1s), +0.02 ± 0.09 (M1) | **Sustained DPS converts duels.** Shortens the 15–18 s gun duel. Untested in reality: C3's −0.14 bundled `upg: auto` with the wider laser hunt. |
 | 13 | e1bcd5a | **`chaseHp: 0.35`**: if an enemy below 35% HP is still tracked (true position for 5 s after it leaves view), within 130 m, and we have no clear shot, walk toward it so it can't regenerate behind cover (only while our HP > 40%). | +0.07 ± 0.12 (M1s), −0.06 ± 0.09 (M1) | **Finish the wounded.** About 30% of our damage went to bots that escaped. Caution: this is a movement change, and every movement change so far (C5–C9) lost in reality. Submit after C11/C12. |
 
-Tried and not submitted: `focus: 2` (sticky target) on C10: +0.01 ± 0.04 (M1s), −0.01 ± 0.05 (M1).
-targetHit already rarely switches targets, so stickiness changes almost nothing.
+Tried and not submitted (on C10, paired, M1s / M1):
+
+| Idea | Effect |
+| --- | --- |
+| `focus: 2` (sticky target) | +0.01 ± 0.04 / −0.01 ± 0.05; targetHit rarely switches anyway |
+| `gunLaserSync` (hold the gun while swinging to the laser's release point) | −0.02 ± 0.11 / −0.09 ± 0.08 |
+| `targetRear` (rear-hit multiplier in time-to-kill) | −0.01 ± 0.12 / −0.05 ± 0.07 |
+
+Suggested order: **C12** (positive in both sim models), then **C11**, then **C13** (a movement
+change, so riskiest). Then stack whichever beat 4.71. The branch tip's `data/params.json` is C10.
 
 ## Recommended order (superseded: C7–C10 are done)
 
