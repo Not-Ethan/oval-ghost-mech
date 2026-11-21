@@ -9,3 +9,42 @@ M1b (vision-only hunters) and M1s (strafing hunters). All three are calibrated t
 | --- | --- | --- | --- | --- |
 | 1 | dee173e | `data/params.json` = `{"lootMem": true, "laserHunt": true}`: remember weapon pickups seen earlier, and without a laser walk to the nearest remembered ground laser within 250 m unless an enemy is visible within 70 m or HP < 45%. Code otherwise = scored defaults. | +0.36 ± 0.16 / +0.35 ± 0.18 / +0.41 ± 0.16 (laser by 60 s in 50% of matches instead of 25%) | **Lasers decide fights.** Sim oracle: spawning with a laser is worth +1.11 ± 0.22. If real rises to about 3.3–3.5, the laser value transfers, and finding lasers sooner (crates, exploring) is the next lever. If real stays about 3.0, real house bots dodge or outrange lasers, or the sim overrates hitscan. |
 | 2 | 7de5fbb | Candidate 1 plus `harvest` (go collect the victim's cubes and weapons after a kill), `mortarUse` (fire a ready mortar with a leading solution), `loadout: "gun"` (gun+laser ranks above laser+lightning), `upg: "dmg"` (damage upgrades before armour) and `dryHold` (stay in the fight while reloading under light pressure). | vs candidate 1: +0.28 ± 0.18 / +0.38 ± 0.18 / +0.38 ± 0.16. vs defaults: 3.77 vs 3.13 / 3.80 vs 3.06 / 3.85 vs 3.06 | **Power growth adds up.** Each piece is worth about +0.05–0.1 in the sim. Real C2 − C1 ≈ +0.3 says small duel and power gains transfer, so keep stacking them. About 0 says the sim's duel model is too optimistic about these details; then focus on bigger structural levers. Submit after candidate 1. |
+
+## Sim findings behind these candidates (M1 unless noted; 200 paired seeds, 95% intervals)
+
+**Why the default bot dies (instrumented sim):** score ≈ kills, and the house never kills its own.
+- The first duel, against one easy hunter, is won about 100% of the time, but slowly: 15–18 s
+  for 1400 HP. The gun's 12-round magazine and 2.4 s reload cap sustained DPS at about 100.
+- Each kill brings 2 more hunters, so after the second kill the match turns into one continuous
+  brawl of about 30 s with a median of 5 mechs involved and 2–3 hunters shooting. It ends in death,
+  mostly to mediums.
+- After a kill, the next mech damage arrives within 3 s (median), so regen never starts.
+- About 30% of our damage goes to bots that escape and regenerate.
+- Kill cubes were barely collected: 0.66 of about 6 per match.
+- Only 25% of matches ever got a laser, and almost always in the first 6 s.
+
+**Oracles (what a resource is worth if handed over):**
+
+| Oracle | Effect |
+| --- | --- |
+| laser at spawn | +1.11 ± 0.22 |
+| lightning at spawn | +0.21 |
+| 3 / 6 / 10 cubes at spawn | +0.38 / +0.56 / +0.96 |
+| full heal on each kill (on candidate 2) | +0.79 (M1), +0.61 (M1b) |
+
+**Neutral or negative, not adopted:**
+
+| Idea | Effect |
+| --- | --- |
+| crate/drone farming | ±0.1 |
+| mild cube grab | ~0 |
+| focus stickiness | ~0 |
+| peek-cover fighting spots | ±0.07 |
+| laser dodge | 0; sim hunters rarely carry lasers, so untestable |
+| adaptive gun lead | −0.07 (M1), +0.05 to +0.10 (strafing M1s) |
+| boost to loot | ~0 |
+| periodic 360° scan | ~0 |
+| longer laser search radius | +0.03 |
+| laserSafe | −0.05 |
+| rearAware (on candidate 2) | −0.03 |
+| attackersOnly (ignore idle bots) | −0.29 / −0.23 / −0.15 |

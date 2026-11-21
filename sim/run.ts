@@ -82,6 +82,9 @@ for (let k = 0; k < N; k++) {
   const sim = new Sim(w, nav, cfg, seed, ctrls)
   sim.verbose = verbose
   for (const i of ours) { sim.track.add(i); sim.rec.set(i, []) }
+  // house variant: these tiers start with a laser (H_LASER_TIERS=hard,expert), like the real recorded enemy
+  const lt = (process.env.H_LASER_TIERS ?? "").split(",").filter(Boolean)
+  if (lt.length) for (const m of sim.mechs) if (m.ctrl.squad && lt.some((t) => m.ctrl.name === "house-" + t)) m.weapons[1] = sim.newWeapon("laser")
   // oracle experiments: what is a resource worth? (--giveWeapon=laser, --giveCubes=5)
   for (const i of ours) {
     if (args.giveWeapon) sim.mechs[i].weapons[1] = sim.newWeapon(args.giveWeapon)

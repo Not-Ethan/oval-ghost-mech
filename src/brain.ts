@@ -23,6 +23,7 @@ type Cand = { x: number; y: number; z: number; c: number; score: number; dist: n
 
 const UPGRADE_PRIOS: Record<string, string[]> = {
   plating: ["plating", "gun_damage", "laser_damage", "gun_rate", "nanites", "armor", "laser_charge", "lightning_efficiency", "servos", "gyros", "gun_velocity", "gun_mag", "capacitor", "reactor", "jets", "lightning_range", "sensors", "lightning_chain", "mortar_reload", "mortar_velocity", "mortar_splash", "laser_pierce"],
+  regen: ["nanites", "plating", "gun_mag", "gun_damage", "laser_damage", "gun_rate", "laser_charge", "armor", "lightning_efficiency", "servos", "gyros", "gun_velocity", "capacitor", "reactor", "jets", "lightning_range", "sensors", "lightning_chain", "mortar_reload", "mortar_velocity", "mortar_splash", "laser_pierce"],
   mag: ["gun_mag", "plating", "gun_damage", "laser_damage", "gun_rate", "laser_charge", "lightning_efficiency", "nanites", "armor", "servos", "gyros", "gun_velocity", "capacitor", "reactor", "jets", "lightning_range", "sensors", "lightning_chain", "mortar_reload", "mortar_velocity", "mortar_splash", "laser_pierce"],
   dmg: ["gun_damage", "laser_damage", "gun_rate", "plating", "laser_charge", "lightning_efficiency", "nanites", "armor", "servos", "gyros", "gun_velocity", "gun_mag", "capacitor", "reactor", "jets", "lightning_range", "sensors", "lightning_chain", "mortar_reload", "mortar_velocity", "mortar_splash", "laser_pierce"],
 }
