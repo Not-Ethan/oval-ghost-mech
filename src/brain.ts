@@ -95,6 +95,8 @@ export type Params = {
   scanEvery: number // with no enemy seen for 8 s, sweep the torso through a full circle every this many seconds (0 = off)
   laserDodge: boolean // a visible enemy charging a laser aimed at us: break line of sight (evade) until it fires or stops
   laserSafe: boolean // laserHunt also holds off for enemies seen in the last 3 s (not only visible ones) and recent damage
+  laserEngageR: number // holding a laser: open fire on any shootable visible enemy within this range (0 = off)
+  laserHold: boolean // a full charge whose target just broke line of sight is held (up to the auto-fire limit) instead of released into cover
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -142,6 +144,8 @@ export const DEFAULT_PARAMS: Params = {
   scanEvery: 0,
   laserDodge: false,
   laserSafe: false,
+  laserEngageR: 0,
+  laserHold: false,
 }
 
 export class Brain {
@@ -163,6 +167,7 @@ export class Brain {
   harvests: { x: number; y: number; z: number; t: number }[] = []
   lastTargetId = -1
   sweepT0 = -99
+  laserFullSince = -1
   sweepYaw0 = 0
   lastTargetT = -99
   // movement
@@ -1037,6 +1042,7 @@ export class Brain {
     const d = hyp(tr.x - x, tr.y - y)
     const frac = tr.hp / Math.max(1, tr.maxHp)
     if (this.P.attackersOnly) return frac < 0.35 && d < 150
+    if (this.P.laserEngageR > 0 && d < this.P.laserEngageR && hpFrac > 0.4 && o.self.weapons.some((w: any) => w && w.kind === "laser") && this.w.shotClear(x, y, z + 7, tr.x, tr.y, tr.z + 4.5)) return true
     // being damaged by someone else (third party)?
     const hist = this.hpHist.get(tr.id)
     const dropping = !!hist && hist.length > 1 && hist[0].hp - tr.hp > 100 && this.t - this.lastDealtT > 2
@@ -1457,6 +1463,7 @@ export class Brain {
     me.weapons.forEach((w: any, i: number) => { if (!w) return; if (w.kind === "gun") slotGun = i; else if (w.kind === "laser") slotLaser = i; else if (w.kind === "lightning") slotLight = i; else if (w.kind === "mortar") slotMortar = i })
     const laserW = slotLaser >= 0 ? me.weapons[slotLaser] : null
     const laserCharging = laserW && (laserW.charge ?? 0) > 0
+    if (laserW && (laserW.charge ?? 0) >= (laserW.stats?.charge ?? 0.75) - 0.051) { if (this.laserFullSince < 0) this.laserFullSince = this.t } else this.laserFullSince = -1
 
     // NPC / crate shooting when idle
     let tgtPt: number[] | null = null
@@ -1542,7 +1549,10 @@ export class Brain {
         // early release if the target is about to break line (low streak) - keep simple
       }
     } else if (laserCharging) {
+      const fullC = (laserW.charge ?? 0) >= (laserW.stats?.charge ?? 0.75) - 0.051
       a.fire[slotLaser] = laserW && (laserW.charge ?? 0) < (laserW.stats?.charge ?? 0.75) // keep charging a bit if target lost briefly
+      // hold a full charge for a target that just ducked out of sight (auto-fire comes after hold_s at full)
+      if (this.P.laserHold && fullC && target && this.t - this.laserFullSince < (laserW.stats?.hold_s ?? 2) - 0.35) a.fire[slotLaser] = true
       if (!target) a.fire[slotLaser] = false
     }
 

@@ -44,6 +44,17 @@ measurement.
 | pacifist | 0.08 | 0.03 ± 0.03 | 0.07 ± 0.05 |
 | example bot | 1.15 | 1.09 ± 0.14 | 1.07 ± 0.17 |
 
+Two more variants fit with the same knobs and no retuning:
+
+- **M1s** (`H_MOVE=1`): engaged hunters strafe across the line of fire at walk speed (hard and
+  expert boost sometimes), reverse every 0.4–1.4 s and close in slowly. This mimics the enemy in the
+  real recorded stream (`check/stream.jsonl.gz`, mech 10): median tangential speed 7.8 m/s, reversals
+  every ~0.5–1.5 s, +2 m/s closing, about 1° median aim error, 4 of 4 lasers hit at 56–150 m.
+  It gives defaults 2.98 ± 0.22 and example 1.06 ± 0.14.
+- **M1r** (M1s plus `H_RANGE=1 H_LASER_TIERS=hard,expert`): hunters fight from 90 m with a gun or
+  140 m with a laser, and hard/expert bots start with a laser. It gives defaults 2.94 ± 0.18 and
+  example 1.16 ± 0.11.
+
 Each residual is under 0.11, inside the sim's own noise. A real 48-match score probably carries about
 ±0.3–0.4 (95%) of noise as well.
 
