@@ -26,7 +26,17 @@ async function makeBot(kind: string, paramsJson: string | undefined = args.param
   const mod = await import(args.brain ? new URL("../" + args.brain, import.meta.url).href : "../src/brain.ts")
   const b = new mod.Brain({ world: w, nav, debug: verbose && paramsJson === args.params, params: paramsJson ? JSON.parse(paramsJson) : {} })
   lastBrains.push(b)
-  return { name: "mine", squad: false, hello: (h: any) => { if (args.record) recLines.push(JSON.stringify(h)); b.hello(h) }, end: (m: any) => { if (args.record) recLines.push(JSON.stringify(m)) }, act: (o: any) => { if (args.record) recLines.push(JSON.stringify(o)); let r: any; try { r = b.act(o) } catch (e) { brainErrors++; if (brainErrors <= 3) console.log("BRAIN EXCEPTION t=" + o.t + ": " + ((e as any)?.stack ?? e)); throw e } if (verbose && b.dbg.length) console.log(b.dbg.join("\n")); return r } }
+  return { name: "mine", squad: false, hello: (h: any) => { if (args.record) recLines.push(JSON.stringify(h)); b.hello(h) }, end: (m: any) => { if (args.record) recLines.push(JSON.stringify(m)) }, act: (o: any) => { if (args.record) recLines.push(JSON.stringify(o)); let r: any; try { r = b.act(o) } catch (e) { brainErrors++; if (brainErrors <= 3) console.log("BRAIN EXCEPTION t=" + o.t + ": " + ((e as any)?.stack ?? e)); throw e } if (verbose && b.dbg.length) console.log(b.dbg.join("\n"))
+    if (args.dbgLaser) {
+      for (const e of o.events ?? []) if (e.type === "took" || e.type === "take_failed") console.log(`  t=${o.t} ${JSON.stringify(e)}`)
+      if (b.mode === "laser" && o.tick % 20 === 0) {
+        const g = b.laserGoal(o), [x, y, z] = o.self.pos
+        const myC = nav.nearestWalkable(x, y, 6), gC = g ? nav.nearestWalkable(g[0], g[1], 10) : -1
+        const lp = [...b.pickMem.values()].filter((q: any) => q.kind === "laser").map((q: any) => `${q.id}@${q.pos.map((v: number) => v.toFixed(0))} seen${q.t}`)
+        console.log(`  t=${o.t} pos ${x.toFixed(0)},${y.toFixed(0)},${z.toFixed(1)} goal ${g ? g.map((v: number) => v.toFixed(0)) : "-"} d=${g ? Math.hypot(g[0] - x, g[1] - y).toFixed(1) : "-"} comp ${myC >= 0 ? nav.comp[myC] : -1}/${gC >= 0 ? nav.comp[gC] : -1} surf ${g ? nav.surfAt(g[0], g[1]).toFixed(1) : "-"} direct=${b.directMode} vis=${o.mechs.filter((m: any) => m.kind === "mech").length} lasers ${lp.join(" ")}`)
+      }
+    }
+    return r } }
 }
 
 let brainErrors = 0
