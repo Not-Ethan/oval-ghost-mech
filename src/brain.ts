@@ -109,6 +109,7 @@ export type Params = {
   harvestW: boolean // harvest also goes for a laser dropped at the kill spot when we hold none (needs lootMem)
   laserRoof: number // laserHunt also targets lasers on roofs up to this many metres above our feet (0 = ground only); jets up
   regenHold: number // below this HP fraction start no new opportunistic fights and shoot no crates/drones, so regen can start (0 = off)
+  finishHp: number // don't evade while the current shootable target is below this HP fraction: finish the kill (0 = off)
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -164,6 +165,7 @@ export const DEFAULT_PARAMS: Params = {
   harvestW: false,
   laserRoof: 0,
   regenHold: 0,
+  finishHp: 0,
 }
 
 export class Brain {
@@ -496,7 +498,9 @@ export class Brain {
     if (!dest && (engaged || hostile.length || recentDmg > 0 || (this.recovering && recentThreat))) {
       // an aimed laser charge is a 315-damage hitscan shot about to land: only line of sight stops it
       const laserIn = this.P.laserDodge && visible.some((tr) => tr.charging && hyp(tr.x - x, tr.y - y) > 35 && Math.abs(wrap(tr.aimYaw - Math.atan2(y - tr.y, x - tr.x))) < 0.12)
-      const evade = this.recovering || dry || laserIn || this.shouldEvade(o, visible, threats, hpFrac)
+      let evade = this.recovering || dry || laserIn || this.shouldEvade(o, visible, threats, hpFrac)
+      // a nearly dead target is worth more than our HP: score is kills
+      if (evade && !dry && this.P.finishHp > 0 && target && target.hp / Math.max(1, target.maxHp) < this.P.finishHp && hyp(target.x - x, target.y - y) < 150 && this.w.shotClear(x, y, z + 7, target.x, target.y, target.z + 4.5)) evade = false
       const mode = evade ? "evade" : "fight"
       const stale = this.t - this.destT > 0.6 || !this.dest || this.destWhy !== mode
       if (stale && (!this.dest || performance.now() < this.deadline - 3)) {
