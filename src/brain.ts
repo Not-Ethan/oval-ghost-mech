@@ -121,6 +121,8 @@ export type Params = {
   prefLaser: number // preferred fighting range with a laser (no lightning)
   expW: number // fight spots: penalty per unit of exposure to threats other than the target
   prefLtg: number // preferred fighting range with lightning
+  smartReload: boolean // reload during gaps: target not shootable / out of gun range with half a magazine or less, or nobody visible and not full
+  chaseHp: number // pursue a wounded enemy (HP fraction below this) that broke line of sight, to finish it before it regenerates (0 = off)
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -188,6 +190,8 @@ export const DEFAULT_PARAMS: Params = {
   prefLaser: 110,
   expW: 4,
   prefLtg: 35,
+  smartReload: false,
+  chaseHp: 0,
 }
 
 export class Brain {
@@ -515,6 +519,10 @@ export class Brain {
     if (!dest && this.P.laserCrates && this.P.laserHunt && !me.weapons.some((w: any) => w && w.kind === "laser") && hpFrac > 0.45 && !nearFoes.some((tr) => hyp(tr.x - x, tr.y - y) < this.P.laserNear) && !this.laserGoal(o)) {
       const cg = this.laserCrateGoal(o)
       if (cg) { dest = cg; why = "lcrate" }
+    }
+    if (!dest && this.P.chaseHp > 0 && hpFrac > 0.4) {
+      const cg = this.chaseGoal(o)
+      if (cg) { dest = cg; why = "chase" }
     }
     if (!dest && this.P.dropsAgg && o.drops?.length) {
       const dg = this.dropGoal(o, visible, hpFrac)
@@ -1225,6 +1233,23 @@ export class Brain {
     return [best.x, best.y]
   }
 
+  // a wounded enemy (still tracked: the server reports its true position for memory_s after it leaves view) that we
+  // cannot shoot from here: walk toward it so it cannot sit behind cover and regenerate
+  chaseGoal(o: any): number[] | null {
+    const [x, y, z] = o.self.pos
+    let best: Track | null = null
+    for (const tr of this.tracks.values()) {
+      if (this.t - tr.lastSeen > 0.25) continue // listed this tick (visible or remembered by the server)
+      if (tr.hp / Math.max(1, tr.maxHp) >= this.P.chaseHp) continue
+      const d = hyp(tr.x - x, tr.y - y)
+      if (d > 130) continue
+      if (!best || tr.hp < best.hp) best = tr
+    }
+    if (!best) return null
+    if (this.w.shotClear(x, y, z + 7, best.x, best.y, best.z + 4.5)) return null // we can shoot it: normal fight
+    return [best.x, best.y]
+  }
+
   // a supply drop worth taking now: landed (or landing by the time we arrive), inside the zone, not held by
   // another mech, and not contested by 2+ visible enemies near us; stand at its centre to capture it
   dropGoal(o: any, visible: Track[], hpFrac: number): number[] | null {
@@ -1663,7 +1688,8 @@ export class Brain {
       if (laserCharging) a.fire[slotLaser] = false
       // reload when idle
       const g = slotGun >= 0 ? me.weapons[slotGun] : null
-      if (g && g.reload <= 0 && g.ammo < (g.stats?.mag ?? 12) * 0.6 && visible.length === 0) a.reload = true
+      if (g && g.reload <= 0 && g.ammo < (g.stats?.mag ?? 12) * (this.P.smartReload ? 0.99 : 0.6) && visible.length === 0) a.reload = true
+      if (this.P.smartReload && g && g.reload <= 0 && g.ammo <= (g.stats?.mag ?? 12) * 0.5) a.reload = true
       return
     }
 
@@ -1761,6 +1787,12 @@ export class Brain {
       const maxGunRange = isMech ? this.P.maxGunRange : 120
       if (err < tol + slewTick * this.P.fireSlack && dist < maxGunRange && g.reload <= 0 && !mortarAiming && !(isMech && this.P.fireMinP > 0 && hitP < this.P.fireMinP)) a.fire[slotGun] = true
       if (g.ammo === 0 && g.reload <= 0) a.reload = true
+    }
+    if (this.P.smartReload && slotGun >= 0 && isMech) {
+      // gap in the fight (no clear shot, or target beyond gun range): top up now rather than mid-duel
+      const g = me.weapons[slotGun]
+      const noShot = !shotOk || dist > (isMech ? this.P.maxGunRange : 120)
+      if (noShot && g.reload <= 0 && g.ammo <= (g.stats?.mag ?? 12) * 0.5) a.reload = true
     }
     if (slotLight >= 0 && shotOk) {
       const lw = me.weapons[slotLight]
