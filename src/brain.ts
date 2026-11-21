@@ -116,6 +116,7 @@ export type Params = {
   leadMC: boolean // gun lead from sampled strafe futures (pooled reversal intervals, time since the target's last reversal, accel limit); aim at the window with the most samples
   fireMinP: number // with leadMC: fire the gun only when the estimated hit chance of the shot is at least this (0 = off)
   leadMCMean: boolean // leadMC aims at the mean of the sampled futures instead of the densest window
+  targetHit: boolean // choose the target with the shortest estimated time to kill (gun hit chance by range and strafing, laser hitscan)
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -178,6 +179,7 @@ export const DEFAULT_PARAMS: Params = {
   leadMC: false,
   fireMinP: 0,
   leadMCMean: false,
+  targetHit: false,
 }
 
 export class Brain {
@@ -1135,10 +1137,28 @@ export class Brain {
       shooters.push(b.b)
     }
     let best: Track | null = null, bs = -Infinity
+    const me = o.self
+    const gunW = me.weapons.find((w: any) => w && w.kind === "gun")
+    const hasLaser = me.weapons.some((w: any) => w && w.kind === "laser")
+    const hasLtg = me.weapons.some((w: any) => w && w.kind === "lightning")
     for (const tr of visible) {
       const d = hyp(tr.x - x, tr.y - y)
       if (d > 260) continue
       let s = -d / 40 - (tr.hp / Math.max(1, tr.maxHp)) * 4
+      if (this.P.targetHit) {
+        // gun hit chance by range (shooting gallery: strafer vs straight runner), blended by this target's reversal rate
+        const pS = d <= 50 ? 1 : d <= 75 ? 1 - 0.12 * (d - 50) / 25 : d <= 100 ? 0.88 - 0.22 * (d - 75) / 25 : d <= 125 ? 0.66 - 0.16 * (d - 100) / 25 : d <= 150 ? 0.5 - 0.07 * (d - 125) / 25 : Math.max(0.2, 0.43 - 0.1 * (d - 150) / 25)
+        const pT = d <= 75 ? 0.97 : d <= 125 ? 0.97 - 0.11 * (d - 75) / 50 : Math.max(0.5, 0.86 - 0.14 * (d - 125) / 50)
+        const flips = tr.rev ? tr.rev.flips.length : 0
+        const span = Math.max(2, Math.min(8, this.t - tr.firstSeen))
+        const strafe = Math.min(1, (flips / span) / 0.8)
+        const pg = d > (this.P.maxGunRange ?? 160) ? 0 : pS * strafe + pT * (1 - strafe)
+        const gs = gunW?.stats ?? this.wcfg("gun")
+        const gunDps = gunW ? ((gs.damage ?? 45) * (gs.mag ?? 12)) / ((gs.mag ?? 12) * (gs.cooldown ?? 0.24) + (gs.reload ?? 2.4)) : 0
+        const dps = gunDps * pg + (hasLaser && d < 275 ? 118 : 0) + (hasLtg && d < 42 ? 200 : 0) + 1
+        const ttk = Math.max(0, tr.hp) / dps
+        s = -ttk / 2.5
+      }
       if (this.t - tr.lastShotAtUs < 2) s += 2.5
       if (tr.charging) s += 1
       const yaw = Math.atan2(tr.y - y, tr.x - x)
