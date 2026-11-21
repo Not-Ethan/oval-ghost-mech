@@ -5,7 +5,7 @@ import { Sim, rng, type Controller } from "./engine.ts"
 import { HouseBot, Squad, SKILLS, ExampleBot } from "./house.ts"
 import { readFileSync } from "node:fs"
 import { gunzipSync, gzipSync } from "node:zlib"
-import { writeFileSync } from "node:fs"
+import { writeFileSync, appendFileSync } from "node:fs"
 
 const args = Object.fromEntries(process.argv.slice(2).map((a) => { const [k, v] = a.replace(/^--/, "").split("="); return [k, v ?? "1"] }))
 const N = Number(args.matches ?? 4)
@@ -40,8 +40,9 @@ for (let k = 0; k < N; k++) {
   const R = rng(seed * 7919)
   const ctrls: Controller[] = []
   let ours: number[] = []
+  let sq: Squad | null = null
   if (mode === "practice") {
-    const sq = new Squad()
+    sq = new Squad()
     const tiers = [...Array(4).fill("easy"), ...Array(4).fill("medium"), ...Array(4).fill("hard"), ...Array(3).fill("expert")]
     const slot = Math.floor(R() * 16)
     let ti = 0
@@ -79,6 +80,10 @@ for (let k = 0; k < N; k++) {
   const t0 = performance.now()
   const sim = new Sim(w, nav, cfg, seed, ctrls)
   sim.verbose = verbose
+  for (const i of ours) { sim.track.add(i); sim.rec.set(i, []) }
+  // practice: our score is fixed once we are dead, so stop there (use --full to play the match out)
+  if (mode === "practice" && !args.full) sim.stopWhenTrackedDead = true
+  if (sq) sq.oracle = () => sim.mechs.filter((m) => m.alive && !m.ctrl.squad).map((m) => ({ id: m.id, pos: [m.x, m.y, m.z], vel: [m.vx, m.vy, m.vz] }))
   const res = sim.run()
   const ms = performance.now() - t0
   for (const i of ours) scores.push(16 - res.places[i])
@@ -95,6 +100,10 @@ for (let k = 0; k < N; k++) {
   const avgMs = lastBrains.length ? lastBrains.reduce((s, b) => s + b.timeStats.sum / Math.max(1, b.timeStats.n), 0) / lastBrains.length : 0
   lastBrains.length = 0
   const i0 = ours[0]
+  if (args.out) {
+    const m0 = sim.mechs[i0]
+    appendFileSync(args.out, JSON.stringify({ seed, slot: i0, bot: botKind, params: args.params ?? null, place: res.places[i0], kills: res.kills[i0], deathT: res.deathT[i0], endT: res.t, cubes: m0.cubes, upgrades: m0.upgrades, weapons: m0.weapons.map((q) => q?.kind ?? null), wst: m0.wst, dealt: res.dmgDealt[i0], taken: res.dmgTaken[i0], deaths: sim.deathLog, houseWst: (() => { const o: any = {}; for (const m of sim.mechs) if (m.ctrl.squad) { const k = m.ctrl.name; o[k] ??= {}; for (const [w, v] of Object.entries(m.wst)) { o[k][w] ??= { shots: 0, hits: 0, dmg: 0 }; o[k][w].shots += v.shots; o[k][w].hits += v.hits; o[k][w].dmg += Math.round(v.dmg) } } return o })(), rec: sim.rec.get(i0) }) + "\n")
+  }
   const hk = res.places.map((p, i) => i).filter((i) => !ours.includes(i))
   console.log(`match ${k} seed ${seed}: place ${ours.map((i) => res.places[i]).join(",")} kills ${ours.map((i) => res.kills[i]).join(",")} death ${ours.map((i) => res.deathT[i].toFixed(0)).join(",")} dealt ${res.dmgDealt[i0]} taken ${res.dmgTaken[i0]} | end t=${res.t.toFixed(0)} houseDead=${hk.filter((i) => res.deathT[i] >= 0).length} acc ${res.acc[i0]} houseAcc ${hk.map((i) => res.acc[i]).filter((a) => !a.startsWith('0/0')).slice(0, 4).join(' ')} (${(ms / 1000).toFixed(1)}s) act avg ${avgMs.toFixed(2)}ms max ${maxMs.toFixed(1)}ms`)
 }

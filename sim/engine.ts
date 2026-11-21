@@ -45,6 +45,7 @@ type Mech = {
   deathT: number; place: number; kills: number
   dmgDealt: number; dmgTaken: number
   shots: number; hits: number; lasers: number; laserHits: number
+  wst: Record<string, { shots: number; hits: number; dmg: number }> // per weapon: shots fired, shots that hit a mech, damage to mechs
 }
 
 type Proj = { id: number; kind: string; owner: number; x: number; y: number; z: number; vx: number; vy: number; vz: number; ttl: number; dmgScale: number }
@@ -70,6 +71,13 @@ export class Sim {
   squadVision = true
   verbose = false
   trace: any[] | null = null
+  // instrumentation: ids whose timeline is recorded (non-squad mechs), and early stop once they are all dead
+  track = new Set<number>()
+  rec = new Map<number, any[]>()
+  stopWhenTrackedDead = false
+  onTick: ((sim: Sim) => void) | null = null
+  deathLog: any[] = []
+  record(id: number, e: any) { const r = this.rec.get(id); if (r) r.push({ t: Math.round(this.t * 100) / 100, ...e }) }
 
   constructor(w: World, nav: Nav, cfg: any, seed: number, ctrls: Controller[]) {
     this.w = w; this.nav = nav; this.cfg = cfg; this.R = rng(seed)
@@ -103,6 +111,7 @@ export class Sim {
         hp: m0.hp, energy: m0.energy, lastSpend: -99, lastCombat: -99, grounded: true, cubes: 0, upgrades: [],
         weapons: [this.newWeapon("gun"), null], shortUntil: -1, equipUntil: [0, 0], offers: [], offerSeq: 1, nextThreshold: 0,
         seen: new Map(), events: [], sounds: [], beams: [], stepAcc: 0, deathT: -1, place: 0, kills: 0, dmgDealt: 0, dmgTaken: 0, shots: 0, hits: 0, lasers: 0, laserHits: 0,
+        wst: { gun: { shots: 0, hits: 0, dmg: 0 }, laser: { shots: 0, hits: 0, dmg: 0 }, lightning: { shots: 0, hits: 0, dmg: 0 }, mortar: { shots: 0, hits: 0, dmg: 0 } },
       })
     })
     // NPCs
@@ -258,6 +267,10 @@ export class Sim {
     amount = Math.round(amount * 100) / 100
     target.hp -= amount
     target.dmgTaken += amount
+    ;(target as any).lastHitW = weapon
+    if (this.track.has(target.id)) this.record(target.id, { e: "taken", amt: Math.round(amount), w: weapon, by, byName: by >= 0 && by < 16 ? this.mechs[by].ctrl.name : by >= 100 ? "npc" : "zone", rear, hp: Math.round(target.hp) })
+    if (by >= 0 && by < 16 && this.track.has(by)) this.record(by, { e: "dealt", amt: Math.round(amount), w: weapon, to: target.id, toName: target.ctrl.name, rear, tgtHp: Math.round(target.hp) })
+    if (by >= 0 && by < 16 && weapon !== "zone" && this.mechs[by].wst[weapon]) this.mechs[by].wst[weapon].dmg += amount
     if (weapon === "zone") (target as any).zoneDmg = ((target as any).zoneDmg ?? 0) + amount
     target.lastCombat = this.t
     const bearing = weapon === "zone" ? null : Math.atan2(srcY - target.y, srcX - target.x)
@@ -277,8 +290,11 @@ export class Sim {
     m.deathT = this.t
     ;(m as any).pendingPlace = true
     if (by >= 0 && by < 16 && by !== m.id) { this.mechs[by].kills++; this.mechs[by].events.push({ type: "kill", target: m.id }) }
+    this.deathLog.push({ t: Math.round(this.t * 10) / 10, id: m.id, name: m.ctrl.name, by, byName: by >= 0 && by < 16 ? this.mechs[by].ctrl.name : by >= 100 ? "npc" : (m as any).lastHitW === "zone" ? "zone" : "self-" + (m as any).lastHitW })
+    if (this.track.has(m.id)) this.record(m.id, { e: "death", by, byName: by >= 0 && by < 16 ? this.mechs[by].ctrl.name : by >= 100 ? "npc" : "zone", alive: this.aliveCount })
+    if (by >= 0 && by < 16 && this.track.has(by)) this.record(by, { e: "kill", victim: m.id, victimName: m.ctrl.name, myHp: Math.round(this.mechs[by].hp), victimCubes: m.cubes, victimWeapons: m.weapons.filter((w) => w).map((w) => w!.kind) })
     const n = m.cubes + this.cfg.cubes.death_drop_extra
-    for (let i = 0; i < n; i++) this.cubes.push({ id: this.nextId.cube++, x: m.x + (this.R() - 0.5) * 6, y: m.y + (this.R() - 0.5) * 6, z: m.z })
+    for (let i = 0; i < n; i++) this.cubes.push({ id: this.nextId.cube++, x: m.x + (this.R() - 0.5) * 6, y: m.y + (this.R() - 0.5) * 6, z: m.z, src: "mech" })
     for (const w of m.weapons) if (w && w.kind !== "gun") this.addPickup(w.kind, m.x + (this.R() - 0.5) * 4, m.y + (this.R() - 0.5) * 4, m.z)
     this.sound("death", m.x, m.y, m.id)
   }
@@ -398,7 +414,7 @@ export class Sim {
     if (typeof a.pick === "number" && m.offers.length) {
       const o = m.offers[0]
       const ch = o.choices[a.pick | 0]
-      if (ch) { m.offers.shift(); m.upgrades.push(ch.id); m.events.push({ type: "upgrade", id: ch.id }); this.afterUpgrade(m) }
+      if (ch) { m.offers.shift(); m.upgrades.push(ch.id); m.events.push({ type: "upgrade", id: ch.id }); this.afterUpgrade(m); if (this.track.has(m.id)) this.record(m.id, { e: "upgrade", id: ch.id, offered: o.choices.map((c: any) => c.id) }) }
     }
     if (typeof a.take === "number") this.tryTake(m, a.take, typeof a.drop === "number" ? a.drop : -1)
     else if (typeof a.drop === "number") {
@@ -434,6 +450,7 @@ export class Sim {
     w.cooldown = Math.max(w.cooldown, this.cfg.loot.equip_s, st.cooldown)
     m.weapons[slot] = w
     m.events.push({ type: "took", id: p.id, kind: p.kind, slot })
+    if (this.track.has(m.id)) this.record(m.id, { e: "took", kind: p.kind, slot })
   }
 
   // ------------------------------------------------------------------ weapons
@@ -465,6 +482,7 @@ export class Sim {
           if (w.cooldown < 0) w.cooldown = 0
           w.ammo--
           m.shots++
+          m.wst.gun.shots++
           if (w.ammo <= 0) w.reload = st.reload
           this.sound("gun", m.x, m.y, m.id)
         }
@@ -473,6 +491,7 @@ export class Sim {
         if (m.fire[slot] && w.cooldown <= 0) {
           const [x, y, z, dx, dy, dz] = this.muzzle(m, s, s.height + 0.5)
           this.projs.push({ id: this.nextId.proj++, kind: "mortar", owner: m.id, x, y, z, vx: dx * st.speed, vy: dy * st.speed, vz: dz * st.speed, ttl: st.ttl, dmgScale: s.dmgScale })
+          m.wst.mortar.shots++
           w.cooldown = st.cooldown
           this.sound("mortar", m.x, m.y, m.id)
         }
@@ -493,6 +512,7 @@ export class Sim {
         if (m.fire[slot] && w.cooldown <= 0 && m.energy >= st.energy) {
           m.energy -= st.energy; m.lastSpend = this.t
           w.cooldown = st.cooldown
+          m.wst.lightning.shots++
           this.fireLightning(m, s, st)
         }
         if (w.cooldown < 0) w.cooldown = 0
@@ -511,7 +531,8 @@ export class Sim {
     let pierce = st.pierce
     let endT = tw
     m.lasers++
-    if (hits.some((h) => h.kind === "mech")) m.laserHits++
+    m.wst.laser.shots++
+    if (hits.some((h) => h.kind === "mech")) { m.laserHits++; m.wst.laser.hits++ }
     for (const h of hits) {
       let dmg = st.damage * frac * s.dmgScale
       if (h.kind === "mech") {
@@ -563,6 +584,7 @@ export class Sim {
             eff = "short"
             tg.events.push({ type: "effect", effect: "short", by: m.id })
           }
+          if (j === 0) m.wst.lightning.hits++
           this.damage(tg, dmg, "lightning", m.id, px, py, eff)
         } else this.damageThing(cur, dmg, m)
         px = cur.x; py = cur.y
@@ -620,7 +642,7 @@ export class Sim {
       if (by) { n.target = by.id; n.aggroT = this.t; by.events.push({ type: "hit", target: n.id, amount: dmg, weapon: "x" }); by.lastCombat = this.t }
       if (n.hp <= 0) {
         n.alive = false
-        for (let i = 0; i < this.cfg.npc.cubes; i++) this.cubes.push({ id: this.nextId.cube++, x: n.x + (this.R() - 0.5) * 3, y: n.y + (this.R() - 0.5) * 3, z: n.z })
+        for (let i = 0; i < this.cfg.npc.cubes; i++) this.cubes.push({ id: this.nextId.cube++, x: n.x + (this.R() - 0.5) * 3, y: n.y + (this.R() - 0.5) * 3, z: n.z, src: "npc" })
       }
     } else if (c.kind === "crate") {
       const cr = c.ref
@@ -630,7 +652,7 @@ export class Sim {
       if (cr.hp <= 0) {
         this.crates.splice(this.crates.indexOf(cr), 1)
         this.sound("crate", cr.x, cr.y, -1)
-        for (let i = 0; i < this.cfg.crates.cubes; i++) this.cubes.push({ id: this.nextId.cube++, x: cr.x, y: cr.y, z: cr.z })
+        for (let i = 0; i < this.cfg.crates.cubes; i++) this.cubes.push({ id: this.nextId.cube++, x: cr.x, y: cr.y, z: cr.z, src: "crate" })
         if (this.R() < this.cfg.loot.crate_weapon_chance) this.addPickup(this.randomWeaponKind(), cr.x + 1, cr.y, cr.z)
       }
     }
@@ -650,7 +672,7 @@ export class Sim {
       if (h) {
         const hx = p.x + dx * h.t, hy = p.y + dy * h.t, hz = p.z + dz * h.t
         if (p.kind === "mortar") this.explode(p, hx, hy, hz, h)
-        else if (h.kind === "mech") { if (p.kind === "gun" && p.owner < 16) this.mechs[p.owner].hits++; this.damage(this.mechs[h.id], p.dmgScale, p.kind === "npc" ? "npc" : "gun", p.owner, p.x - p.vx * 0.1, p.y - p.vy * 0.1) }
+        else if (h.kind === "mech") { if (p.kind === "gun" && p.owner < 16) { this.mechs[p.owner].hits++; this.mechs[p.owner].wst.gun.hits++ } this.damage(this.mechs[h.id], p.dmgScale, p.kind === "npc" ? "npc" : "gun", p.owner, p.x - p.vx * 0.1, p.y - p.vy * 0.1) }
         else this.damageThing(h, p.dmgScale, p.owner >= 0 && p.owner < 16 ? this.mechs[p.owner] : null)
         continue
       }
@@ -671,6 +693,7 @@ export class Sim {
     this.sound("explosion", x, y, -1)
     if (direct && direct.kind === "mech") {
       const tg = this.mechs[direct.id]
+      this.mechs[p.owner].wst.mortar.hits++
       let eff: string | undefined
       this.damage(tg, st.damage * p.dmgScale, "mortar", p.owner, x, y)
     } else if (direct) this.damageThing(direct, st.damage * p.dmgScale, this.mechs[p.owner])
@@ -758,7 +781,7 @@ export class Sim {
     // offers timeout
     for (const m of this.mechs) {
       if (!m.alive || !m.offers.length) continue
-      if (this.t >= m.offers[0].expires) { const ch = m.offers.shift().choices[0]; m.upgrades.push(ch.id); m.events.push({ type: "upgrade", id: ch.id }); this.afterUpgrade(m) }
+      if (this.t >= m.offers[0].expires) { const ch = m.offers.shift().choices[0]; m.upgrades.push(ch.id); m.events.push({ type: "upgrade", id: ch.id }); this.afterUpgrade(m); if (this.track.has(m.id)) this.record(m.id, { e: "upgrade", id: ch.id, timeout: true }) }
     }
     for (const m of this.mechs) if (m.alive) this.stepMech(m, dt)
     for (const m of this.mechs) if (m.alive) this.fireWeapons(m, dt)
@@ -782,9 +805,26 @@ export class Sim {
       for (const m of dying) { m.place = this.aliveCount; (m as any).pendingPlace = false; m.ctrl.end?.({ type: "end", place: m.place, kills: m.kills }) }
       this.aliveCount -= dying.length
     }
+    if (this.track.size && this.tick % this.cfg.match.tick_hz === 0) {
+      for (const id of this.track) {
+        const m = this.mechs[id]
+        if (!m.alive) continue
+        const { s } = this.stats(m)
+        // who can see us right now (any living squad mech), and how many could shoot (line of fire within 230 m)
+        let seenBy = 0
+        for (const o of this.mechs) {
+          if (!o.alive || o === m || !o.ctrl.squad) continue
+          if (o.seen.get(m.id) === this.t) seenBy++
+        }
+        const inZ = Math.hypot(m.x - zn.cx, m.y - zn.cy) <= zn.r
+        this.record(id, { e: "s", hp: Math.round(m.hp), max: Math.round(s.hp), cubes: m.cubes, ups: m.upgrades.length, w: m.weapons.map((w) => w ? w.kind[0] : "-").join(""), regen: inZ && this.t - m.lastCombat >= s.regen_delay ? 1 : 0, seenBy, alive: this.aliveCount, pos: [Math.round(m.x), Math.round(m.y)] })
+      }
+    }
+    this.onTick?.(this)
     this.tick++
     this.t = this.tick * dt
     this.updateZone()
+    if (this.stopWhenTrackedDead && this.track.size && [...this.track].every((id) => !this.mechs[id].alive)) return false
     if (this.aliveCount <= 1 || this.t >= this.cfg.match.duration_s) {
       const surv = this.mechs.filter((m) => m.alive).sort((a, b) => b.hp - a.hp)
       surv.forEach((m, i) => { m.place = i + 1; m.ctrl.end?.({ type: "end", place: m.place, kills: m.kills }) })
@@ -854,6 +894,7 @@ export class Sim {
       if (!best) { keep.push(c); continue }
       this.giveCubes(best, 1)
       best.events.push({ type: "pickup", cubes: best.cubes })
+      if (this.track.has(best.id)) this.record(best.id, { e: "cube", cubes: best.cubes, src: c.src ?? "?" })
     }
     this.cubes = keep
   }
@@ -906,6 +947,7 @@ export class Sim {
           const { s } = this.stats(m)
           m.hp = s.hp; m.energy = s.energy
           m.events.push({ type: "drop", id: d.id, cubes: m.cubes })
+          if (this.track.has(m.id)) this.record(m.id, { e: "supply", cubes: m.cubes })
         }
       } else if (inside.length === 0) { d.holder = null; d.progress = 0 }
     }

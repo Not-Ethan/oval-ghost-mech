@@ -20,6 +20,11 @@ type Track = {
 
 type Cand = { x: number; y: number; z: number; c: number; score: number; dist: number; exp: number }
 
+const UPGRADE_PRIOS: Record<string, string[]> = {
+  plating: ["plating", "gun_damage", "laser_damage", "gun_rate", "nanites", "armor", "laser_charge", "lightning_efficiency", "servos", "gyros", "gun_velocity", "gun_mag", "capacitor", "reactor", "jets", "lightning_range", "sensors", "lightning_chain", "mortar_reload", "mortar_velocity", "mortar_splash", "laser_pierce"],
+  mag: ["gun_mag", "plating", "gun_damage", "laser_damage", "gun_rate", "laser_charge", "lightning_efficiency", "nanites", "armor", "servos", "gyros", "gun_velocity", "capacitor", "reactor", "jets", "lightning_range", "sensors", "lightning_chain", "mortar_reload", "mortar_velocity", "mortar_splash", "laser_pierce"],
+  dmg: ["gun_damage", "laser_damage", "gun_rate", "plating", "laser_charge", "lightning_efficiency", "nanites", "armor", "servos", "gyros", "gun_velocity", "gun_mag", "capacitor", "reactor", "jets", "lightning_range", "sensors", "lightning_chain", "mortar_reload", "mortar_velocity", "mortar_splash", "laser_pierce"],
+}
 const UPGRADE_PRIO = ["armor", "plating", "nanites", "gun_damage", "laser_damage", "gun_rate", "laser_charge", "lightning_efficiency", "servos", "gyros", "gun_velocity", "capacitor", "reactor", "jets", "lightning_range", "gun_mag", "sensors", "lightning_chain", "mortar_reload", "mortar_velocity", "mortar_splash", "laser_pierce"]
 const WEAPON_PRIO: Record<string, number> = { laser: 3, lightning: 2, mortar: 1, gun: 0 }
 // value of a two-slot loadout (order irrelevant)
@@ -51,6 +56,16 @@ export type Params = {
   rearAware: boolean // keep active shooters in the front arc when choosing targets / spots
   drops: boolean // go for supply drops when uncontested
   pacifist?: boolean // testing only: never fire
+  farm: boolean // walk to remembered crates / drones and shoot them for cubes while no enemy has been seen recently
+  farmMaxCubes: number // stop farming at this many cubes (stats cap at 10)
+  farmR: number // farm targets within this distance
+  farmQuiet: number // seconds without seeing an enemy before farming
+  cubeGrab: boolean // pick up cubes after kills more aggressively (also mid-fight when close)
+  upg: string // upgrade priority: "old" (armor first), "plating", "dmg", "mag"
+  harvest: boolean // after a kill, go collect the victim's cubes (and weapon) while few enemies are visible
+  harvestMaxVis: number // ... with at most this many visible enemies within 120 m
+  harvestHp: number // ... and HP fraction above this
+  harvestS: number // seconds after the kill the harvest stays a goal
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -69,6 +84,16 @@ export const DEFAULT_PARAMS: Params = {
   rearAware: false,
   drops: true,
   pacifist: false,
+  farm: false,
+  farmMaxCubes: 10,
+  farmR: 160,
+  farmQuiet: 15,
+  cubeGrab: false,
+  upg: "old",
+  harvest: false,
+  harvestMaxVis: 1,
+  harvestHp: 0.3,
+  harvestS: 30,
 }
 
 export class Brain {
@@ -82,6 +107,11 @@ export class Brain {
   tick = 0
   tracks = new Map<number, Track>()
   npcs = new Map<number, any>()
+  crates = new Map<number, { x: number; y: number; z: number; hp: number; t: number; since: number }>()
+  farmId = -1
+  farmSince = 0
+  farmBan = new Set<number>()
+  harvests: { x: number; y: number; z: number; t: number }[] = []
   // movement
   path: number[] | null = null
   pathGoal: number[] | null = null
@@ -249,7 +279,7 @@ export class Brain {
     this.dest = null; this.destT = -99; this.hold = null; this.holdKey = ""; this.stuckT = 0; this.mode = "init"
     this.dmgWindow = []; this.threatBearings = []; this.sounds = []; this.lastDamagedT = -99; this.lastDealtT = -99
     this.dfieldT = -99; this.timeStats = { n: 0, max: 0, sum: 0 }; this.jukeT = 0; this.scanT = 0; this.scanStartYaw = null; this.recovering = false; this.npcAggro = null; this.hpHist.clear(); this.directMode = false
-    this.relocTarget = null; this.relocUntil = 0; this.relocT = -99; this.ffaEvidence = 0; this.ffaDetectedAt = -1; this.ourHits.clear()
+    this.crates.clear(); this.harvests = []; this.farmId = -1; this.farmBan.clear(); this.relocTarget = null; this.relocUntil = 0; this.relocT = -99; this.ffaEvidence = 0; this.ffaDetectedAt = -1; this.ourHits.clear()
   }
 
   // ------------------------------------------------------------------ helpers
@@ -366,6 +396,10 @@ export class Brain {
     const ltgReady = ltgW && me.energy > 15 && target && hyp(target.x - x, target.y - y) < 40
     const gunReady = !!gunW && gunW.reload <= 0.5 && (gunW.ammo ?? 1) > 0
     const dry = !gunReady && !laserReady && !ltgReady
+    if (!dest && this.P.harvest && this.harvests.length) {
+      const h = this.harvestGoal(o, visible, hpFrac)
+      if (h) { dest = h; why = "harvest" }
+    }
     if (!dest && (engaged || hostile.length || recentDmg > 0 || (this.recovering && recentThreat))) {
       const evade = this.recovering || dry || this.shouldEvade(o, visible, threats, hpFrac)
       const mode = evade ? "evade" : "fight"
@@ -409,6 +443,10 @@ export class Brain {
     if (!dest && !this.recovering) {
       const loot = this.lootTarget(o, threats)
       if (loot) { dest = loot; why = "loot" }
+    }
+    if (!dest && !this.recovering && this.P.farm && performance.now() < this.deadline - 1) {
+      const f = this.farmTarget(o, threats)
+      if (f) { dest = f; why = "farm" }
     }
     if (!dest) {
       const th = performance.now()
@@ -502,6 +540,23 @@ export class Brain {
       while (hh.length && o.t - hh[0].t > 4) hh.shift()
     }
     for (const [id, n] of this.npcs) if (o.t - n.t > 10) this.npcs.delete(id)
+    // crate memory: crates are listed only while seen; forget one we should see from close by but do not
+    const listed = new Set<number>()
+    for (const c of o.crates ?? []) {
+      if (!c || !Array.isArray(c.pos)) continue
+      listed.add(c.id)
+      const old = this.crates.get(c.id)
+      this.crates.set(c.id, { x: c.pos[0], y: c.pos[1], z: c.pos[2], hp: c.hp ?? 300, t: o.t, since: old?.since ?? o.t })
+    }
+    if (this.crates.size) {
+      const [x, y, z] = o.self.pos
+      const ez = z + (o.self.stats?.eye_height ?? 8)
+      for (const [id, c] of this.crates) {
+        if (listed.has(id)) continue
+        const d = hyp(c.x - x, c.y - y)
+        if (d < 35 && this.w.sees(x, y, ez, c.x, c.y, c.z + 1.2, false)) this.crates.delete(id)
+      }
+    }
   }
 
   processEvents(o: any) {
@@ -525,6 +580,8 @@ export class Brain {
         if (typeof e.target === "number") this.ourHits.set(e.target, o.t)
       } else if (e.type === "kill") {
         if (this.debugOn) this.dbg.push(`  KILL ${e.target}`)
+        const v = this.tracks.get(e.target)
+        if (v) this.harvests.push({ x: v.x, y: v.y, z: v.z, t: o.t })
         this.tracks.delete(e.target)
       }
     }
@@ -810,6 +867,7 @@ export class Brain {
         }
       }
       s += this.coverScore(cd.c) * 1.5 - (this.P.rearAware ? arcPen : 0)
+      if (this.P.cubeGrab && o.cubes?.length) for (const cu of o.cubes) if (hyp(cu.pos[0] - cd.x, cu.pos[1] - cd.y) < 3.2 && Math.abs(cu.pos[2] - cd.z) < 3) s += 1.5
       if (s > bs) { bs = s; best = cd }
     }
     return [best.x, best.y]
@@ -920,19 +978,86 @@ export class Brain {
     return best
   }
 
+  // the spot where a victim died: its cubes (and weapons) lie within ~3 m of it
+  harvestGoal(o: any, visible: Track[], hpFrac: number): number[] | null {
+    const [x, y] = o.self.pos
+    this.harvests = this.harvests.filter((h) => this.t - h.t < this.P.harvestS)
+    if (!this.harvests.length) return null
+    const zf = this.zoneAt(o, this.t + 6)
+    let best: number[] | null = null, bd = Infinity
+    for (let i = this.harvests.length - 1; i >= 0; i--) {
+      const h = this.harvests[i]
+      const dh = hyp(h.x - x, h.y - y)
+      const near = (o.cubes ?? []).filter((c: any) => hyp(c.pos[0] - h.x, c.pos[1] - h.y) < 9 && Math.abs(c.pos[2] - h.z) < 4)
+      // done: close enough to see the spot and nothing left there (or it is outside the zone soon)
+      if ((dh < 14 && near.length === 0 && this.t - h.t > 0.5) || hyp(h.x - zf.cx, h.y - zf.cy) > zf.r - 3) { this.harvests.splice(i, 1); continue }
+      let tx = h.x, ty = h.y, td = dh
+      for (const c of near) { const d = hyp(c.pos[0] - x, c.pos[1] - y); if (d < td) { td = d; tx = c.pos[0]; ty = c.pos[1] } }
+      if (td < bd) { bd = td; best = [tx, ty] }
+    }
+    if (!best || bd > 150) return null
+    const visN = visible.filter((tr) => hyp(tr.x - x, tr.y - y) < 120).length
+    if (visN > this.P.harvestMaxVis || hpFrac < this.P.harvestHp) return null
+    return best
+  }
+
+  // walk to a remembered ground-level crate (1 cube, maybe a weapon) or a drone (2 cubes) and shoot it from close by
+  farmTarget(o: any, threats: Track[]): number[] | null {
+    const me = o.self
+    const [x, y, z] = me.pos
+    if ((me.cubes ?? 0) >= this.P.farmMaxCubes) return null
+    if (me.hp < (me.max_hp || 1400) * 0.6) return null
+    if (threats.some((tr) => this.t - tr.lastSeen < this.P.farmQuiet)) return null
+    const zf = this.zoneAt(o, this.t + 20)
+    let best: number[] | null = null, bs = Infinity, bid = -1, isNpc = false
+    for (const [id, c] of this.crates) {
+      if (this.farmBan.has(id)) continue
+      if (Math.abs(c.z - this.nav.surfAt(c.x, c.y)) > 2.5) continue // roof crate
+      const d = hyp(c.x - x, c.y - y)
+      if (d > this.P.farmR) continue
+      if (hyp(c.x - zf.cx, c.y - zf.cy) > zf.r - 15) continue
+      if (d < bs) { bs = d; best = [c.x, c.y]; bid = id; isNpc = false }
+    }
+    if (me.hp > (me.max_hp || 1400) * 0.75) {
+      for (const [id, n] of this.npcs) {
+        if (this.t - n.t > 3 || this.farmBan.has(id)) continue
+        const d = hyp(n.pos[0] - x, n.pos[1] - y)
+        if (d > 110 || hyp(n.pos[0] - zf.cx, n.pos[1] - zf.cy) > zf.r - 15) continue
+        if (d - 30 < bs) { bs = d - 30; best = [n.pos[0], n.pos[1]]; bid = id; isNpc = true }
+      }
+    }
+    if (!best) { this.farmId = -1; return null }
+    if (bid !== this.farmId) { this.farmId = bid; this.farmSince = this.t }
+    else if (this.t - this.farmSince > 30) { this.farmBan.add(bid); this.farmId = -1; return null } // unreachable or taking too long
+    const d = hyp(best[0] - x, best[1] - y)
+    const muz = z + (me.stats?.muzzle_height ?? 7)
+    const close = isNpc ? 45 : 26
+    if (d < close && this.w.shotClear(x, y, muz, best[0], best[1], isNpc ? this.npcs.get(bid).pos[2] + 1.75 : this.crates.get(bid)!.z + 1.2)) return [x, y]
+    return best
+  }
+
   lootTarget(o: any, threats: Track[]): number[] | null {
     const me = o.self
     const [x, y, z] = me.pos
     const zfut = this.zoneAt(o, this.t + 15)
     if (threats.some((tr) => this.t - tr.lastSeen < 6 && hyp(tr.x - x, tr.y - y) < 150)) {
       // only nearby cubes (e.g. after a kill) when nobody visible is close
-      if (threats.some((tr) => tr.visible && hyp(tr.x - x, tr.y - y) < 90)) return null
+      const visClose = threats.some((tr) => tr.visible && hyp(tr.x - x, tr.y - y) < 90)
+      if (visClose && !this.P.cubeGrab) return null
+      if (visClose) {
+        let bc: number[] | null = null, bd = 16
+        for (const c of o.cubes ?? []) {
+          const d = hyp(c.pos[0] - x, c.pos[1] - y)
+          if (d < bd && Math.abs(c.pos[2] - z) < 3) { bd = d; bc = [c.pos[0], c.pos[1]] }
+        }
+        return bc
+      }
       // a valuable weapon close by (e.g. dropped by a kill)
       for (const p of o.pickups ?? []) {
         const [gain] = this.takeGain(me, p.kind)
         if (gain >= 1.5 && hyp(p.pos[0] - x, p.pos[1] - y) < 32 && Math.abs(p.pos[2] - z) < 3) return [p.pos[0], p.pos[1]]
       }
-      let bc: number[] | null = null, bd = 28
+      let bc: number[] | null = null, bd = this.P.cubeGrab ? 50 : 28
       for (const c of o.cubes ?? []) {
         const d = hyp(c.pos[0] - x, c.pos[1] - y)
         if (d < bd && Math.abs(c.pos[2] - z) < 3) { bd = d; bc = [c.pos[0], c.pos[1]] }
@@ -1007,7 +1132,8 @@ export class Brain {
   pickUpgrade(choices: any[], me: any): number {
     let best = 0, bi = 999
     // late game: the final zone bleeds everyone (armor does not help there), max HP decides
-    const prio = this.t > 300 ? ["plating", ...UPGRADE_PRIO.filter((u) => u !== "plating")] : UPGRADE_PRIO
+    const base = UPGRADE_PRIOS[this.P.upg] ?? UPGRADE_PRIO
+    const prio = this.t > 300 ? ["plating", ...base.filter((u) => u !== "plating")] : base
     choices.forEach((c: any, i: number) => {
       const k = prio.indexOf(c.id)
       const r = k < 0 ? 500 : k
@@ -1177,7 +1303,7 @@ export class Brain {
       const npc = this.aggroNpc(o)
       if (npc) { tgtPt = [npc.pos[0], npc.pos[1], npc.pos[2] + 1.75]; tgtVel = [npc.vel[0], npc.vel[1], 0]; tgtR = 1.8 }
       else { a.aim = [this.npcAggro.b, 0]; return }
-    } else if (this.P.lootNoise && o.t < this.P.lootNoiseUntil && !this.recovering && why !== "alert" && !threats.some((tr) => this.t - tr.lastSeen < 20)) {
+    } else if (this.P.lootNoise && (o.t < this.P.lootNoiseUntil || (this.P.farm && (me.cubes ?? 0) < this.P.farmMaxCubes)) && !this.recovering && why !== "alert" && !threats.some((tr) => this.t - tr.lastSeen < (this.P.farm ? this.P.farmQuiet : 20))) {
       const npc = this.npcTarget(o, threats)
       if (npc) { tgtPt = [npc.pos[0], npc.pos[1], npc.pos[2] + 1.75]; tgtVel = [npc.vel[0], npc.vel[1], 0]; tgtR = 1.8 }
       else {
