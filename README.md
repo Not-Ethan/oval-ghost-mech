@@ -133,7 +133,11 @@ Params added on branch `mech-opt`. All are off by default in code. Candidates tu
 | `lootBoost` | false | Boosts while walking to a laser or harvesting. |
 | `farm` (`farmMaxCubes`, `farmR`, `farmQuiet`) | false | Walks to remembered crates and drones and shoots them for cubes when no enemy has been seen for `farmQuiet` s. |
 | `peek` | 0 | Bonus for fighting spots that have a fully hidden spot within 9 m. |
-| `attackersOnly`, `focus`, `cubeGrab`, `rangeW`, `jukeMin`/`jukeVar`/`jukeW` | off / defaults | Experimental. Neutral or worse in the sim. |
+| `laserHp` | 0.45 | `laserHunt` only runs above this HP fraction. |
+| `rangeW` | 0.02 | Weight of the preferred-range term when choosing a fighting spot (gun 75 m, laser 110 m, lightning 35 m). |
+| `loadout: "nomortar"` | | Like `"gun"`, but never carries a mortar, because an enemy laser does +60% to a mech holding one. |
+| `laserEngageR`, `laserHold`, `laserSafe`, `laserCrates`, `laserRoof`, `harvestW`, `dropsAgg`, `regenHold`, `finishHp`, `kite`, `scoutT`, `leadMC`, `leadMCMean`, `fireMinP` | off | Experimental; see the `Params` comments in `src/brain.ts`. Neutral or worse in the sim so far (`CANDIDATES.md`). |
+| `attackersOnly`, `focus`, `cubeGrab`, `jukeMin`/`jukeVar`/`jukeW` | off / defaults | Experimental. Neutral or worse in the sim. |
 
 ## Local simulator (`sim/`)
 
