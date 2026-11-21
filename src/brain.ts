@@ -92,6 +92,8 @@ export type Params = {
   laserR: number // ... within this distance
   laserNear: number // ... and no visible enemy within this distance
   lootBoost: boolean // boost (energy permitting) while walking to a laser or harvesting
+  scanEvery: number // with no enemy seen for 8 s, sweep the torso through a full circle every this many seconds (0 = off)
+  laserDodge: boolean // a visible enemy charging a laser aimed at us: break line of sight (evade) until it fires or stops
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -136,6 +138,8 @@ export const DEFAULT_PARAMS: Params = {
   laserR: 250,
   laserNear: 70,
   lootBoost: false,
+  scanEvery: 0,
+  laserDodge: false,
 }
 
 export class Brain {
@@ -156,6 +160,8 @@ export class Brain {
   farmBan = new Set<number>()
   harvests: { x: number; y: number; z: number; t: number }[] = []
   lastTargetId = -1
+  sweepT0 = -99
+  sweepYaw0 = 0
   lastTargetT = -99
   // movement
   path: number[] | null = null
@@ -453,7 +459,9 @@ export class Brain {
       if (h) { dest = h; why = "harvest" }
     }
     if (!dest && (engaged || hostile.length || recentDmg > 0 || (this.recovering && recentThreat))) {
-      const evade = this.recovering || dry || this.shouldEvade(o, visible, threats, hpFrac)
+      // an aimed laser charge is a 315-damage hitscan shot about to land: only line of sight stops it
+      const laserIn = this.P.laserDodge && visible.some((tr) => tr.charging && hyp(tr.x - x, tr.y - y) > 35 && Math.abs(wrap(tr.aimYaw - Math.atan2(y - tr.y, x - tr.x))) < 0.12)
+      const evade = this.recovering || dry || laserIn || this.shouldEvade(o, visible, threats, hpFrac)
       const mode = evade ? "evade" : "fight"
       const stale = this.t - this.destT > 0.6 || !this.dest || this.destWhy !== mode
       if (stale && (!this.dest || performance.now() < this.deadline - 3)) {
@@ -1239,7 +1247,57 @@ export class Brain {
     }
   }
 
+  // fight power ~ effective HP x sustained DPS: score each choice by its marginal gain
+  upgradeGain(id: string, me: any): number {
+    const ws = (me.weapons ?? []).filter((w: any) => w)
+    const ups: string[] = me.upgrades ?? []
+    const cnt = (u: string) => ups.filter((x) => x === u).length
+    const st = me.stats ?? {}
+    // sustained DPS per held weapon (current stats), with rough hit rates
+    const dps: Record<string, number> = {}
+    for (const w of ws) {
+      const s = w.stats ?? this.wcfg(w.kind)
+      if (w.kind === "gun") dps.gun = ((s.damage ?? 45) * (s.mag ?? 12)) / ((s.mag ?? 12) * (s.cooldown ?? 0.24) + (s.reload ?? 2.4)) * 0.8
+      else if (w.kind === "laser") dps.laser = (s.damage ?? 315) / ((s.charge ?? 0.75) + (s.cooldown ?? 1.65)) * 0.9
+      else if (w.kind === "lightning") dps.lightning = ((s.damage ?? 60) / (s.cooldown ?? 0.25)) * 0.35 // only inside 45 m
+      else if (w.kind === "mortar") dps.mortar = ((s.damage ?? 200) * 0.6) / (s.cooldown ?? 2.6) * 0.5
+    }
+    const tot = Object.values(dps).reduce((a, b) => a + b, 0) || 1
+    const share = (k: string) => (dps[k] ?? 0) / tot
+    const g = this.wcfg("gun")
+    switch (id) {
+      case "plating": return 0.15
+      case "armor": { const a = (st.armor ?? 0); return 1 / (1 - Math.min(0.9, a + 0.08)) * (1 - a) - 1 }
+      case "nanites": return 0.05
+      case "gun_damage": return 0.15 * share("gun")
+      case "gun_rate": { const s = ws.find((w: any) => w.kind === "gun")?.stats ?? g; const m = s.mag ?? 12, c = s.cooldown ?? 0.24, r = s.reload ?? 2.4; return ((m * c + r) / (m * c * 0.87 + r) - 1) * share("gun") }
+      case "gun_mag": { const s = ws.find((w: any) => w.kind === "gun")?.stats ?? g; const m = s.mag ?? 12, c = s.cooldown ?? 0.24, r = s.reload ?? 2.4; return (((m + 8) / ((m + 8) * c + r * 0.8)) / (m / (m * c + r)) - 1) * share("gun") }
+      case "laser_damage": return 0.18 * share("laser")
+      case "laser_charge": { const s = ws.find((w: any) => w.kind === "laser")?.stats ?? this.wcfg("laser"); const ch = s.charge ?? 0.75, cd = s.cooldown ?? 1.65; return ((ch + cd) / (ch * 0.75 + cd) - 1) * share("laser") }
+      case "lightning_efficiency": return 0.1 * share("lightning") + 0.02
+      case "lightning_range": return 0.12 * share("lightning")
+      case "lightning_chain": return 0.03 * share("lightning")
+      case "mortar_reload": return (1 / 0.82 - 1) * share("mortar")
+      case "gyros": return 0.03
+      case "servos": return 0.03
+      case "gun_velocity": return 0.04 * share("gun")
+      case "sensors": return 0.02
+      case "reactor": case "capacitor": return 0.015
+      case "jets": return 0.01
+      default: return 0
+    }
+  }
+
   pickUpgrade(choices: any[], me: any): number {
+    if (this.P.upg === "auto") {
+      let bi = 0, bg = -Infinity
+      choices.forEach((c: any, i: number) => {
+        let gn = this.upgradeGain(c.id, me)
+        if (this.t > 300 && c.id === "plating") gn += 0.2 // the final zone bleeds everyone; armor does not reduce it
+        if (gn > bg) { bg = gn; bi = i }
+      })
+      return bi
+    }
     let best = 0, bi = 999
     // late game: the final zone bleeds everyone (armor does not help there), max HP decides
     const base = UPGRADE_PRIOS[this.P.upg] ?? UPGRADE_PRIO
@@ -1598,6 +1656,13 @@ export class Brain {
     if (o.t < 2.0 && threats.length === 0) {
       if (this.scanStartYaw === null) this.scanStartYaw = me.aim[0]
       return wrap(this.scanStartYaw + Math.min(TAU, (o.t + 0.15) * (me.stats?.turn_rate ?? 4)))
+    }
+    // periodic sweep while quiet: finds loot (and enemies) behind us
+    if (this.P.scanEvery > 0 && !threats.some((tr) => this.t - tr.lastSeen < 8) && this.t - this.lastDamagedT > 8) {
+      const turn = me.stats?.turn_rate ?? 4
+      if (this.t - this.sweepT0 > this.P.scanEvery) { this.sweepT0 = this.t; this.sweepYaw0 = me.aim[0] }
+      const el = this.t - this.sweepT0
+      if (el < TAU / turn + 0.2) return wrap(this.sweepYaw0 + Math.min(TAU, (el + 0.15) * turn))
     }
     // recent damage bearing first
     const lastB = this.threatBearings[this.threatBearings.length - 1]

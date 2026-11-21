@@ -115,6 +115,26 @@ ignored, and the active overrides are logged to stderr at startup.
 | `drops` | true | Contests supply drops when they are uncontested and close. |
 | `relocate` | true | After contact, moves away from where threats last saw it. |
 
+Params added on branch `mech-opt`. All are off by default in code. Candidates turn them on through
+`data/params.json`, and `CANDIDATES.md` lists each candidate with its sim evidence.
+
+| Param | Default | Effect |
+| --- | --- | --- |
+| `lootMem` | false | Remembers weapon pickups seen earlier (they are listed only while in view). |
+| `laserHunt` / `laserR` / `laserNear` | false / 250 / 70 | Without a laser, walks to the nearest remembered ground laser within `laserR` m. It does not go when an enemy is visible within `laserNear` m or HP is below 45%. Needs `lootMem`. |
+| `harvest` (`harvestMaxVis`, `harvestHp`, `harvestS`) | false (1, 0.3, 30) | After a kill, goes to the victim's spot for its cubes and weapons, while at most 1 enemy is visible within 120 m. |
+| `mortarUse` | false | Fires the mortar whenever it is ready, leading the target, and swings the torso off the gun aim for that shot. |
+| `loadout` | "old" | `"gun"` ranks gun+laser above laser+lightning. House hunters fight from beyond lightning range. |
+| `upg` | "old" | Upgrade order: `"old"` (armor first), `"plating"`, `"dmg"`, `"mag"`, or `"auto"` (marginal gain in effective HP × sustained DPS for the weapons held). |
+| `dryHold` | false | When nothing can fire, still breaks line of sight to reload, unless incoming damage is light (one shooter, under 8% HP in 3 s). |
+| `leadAdapt` | false | Scales gun lead by the expected travel of a target that keeps reversing direction (flip rate estimated per track). |
+| `laserDodge` | false | Breaks line of sight while a visible enemy charges a laser aimed at it. |
+| `scanEvery` | 0 | While quiet, sweeps the torso through a full circle every N seconds to spot loot. |
+| `lootBoost` | false | Boosts while walking to a laser or harvesting. |
+| `farm` (`farmMaxCubes`, `farmR`, `farmQuiet`) | false | Walks to remembered crates and drones and shoots them for cubes when no enemy has been seen for `farmQuiet` s. |
+| `peek` | 0 | Bonus for fighting spots that have a fully hidden spot within 9 m. |
+| `attackersOnly`, `focus`, `cubeGrab`, `rangeW`, `jukeMin`/`jukeVar`/`jukeW` | off / defaults | Experimental. Neutral or worse in the sim. |
+
 ## Local simulator (`sim/`)
 
 The kit has no game runner, only `check/check.py`, which replays a recorded stream that does not
@@ -128,19 +148,26 @@ react to the bot. `sim/engine.ts` is my own approximation of the server, written
 - vision: field of view, near range, line of sight, canopy, memory
 - also sound, NPC drones, crates, loot, upgrades, supply drops, and placement
 
-`sim/house.ts` is a guess at the house squad: shared vision, hunting the non-squad mech, and
-four skill tiers. The real house bots are unknown. Calibration point: the kit's example bot
-scores 1.15 on the real ladder but only 0.2-0.4 in this sim, so the sim is harsher than
-reality.
+`sim/house.ts` is a guess at the house squad. It hunts with escalating numbers, weakest tier
+first (1 + 2 per dead member), while the other members stay passive. It is calibrated to four
+real practice scores (defaults, engageAll, never-fire, and the kit's example bot), and each fits
+within about 0.1. See `sim/CALIBRATION.md` for the model, the fit, and what it does not pin down.
+In practice mode a match stops when our mech dies, because the score is fixed from then on.
 
 ```sh
-node sim/run.ts --bot=mine --matches=5 --seed=1                     # practice vs house squad
-HOUSE_STRENGTH=0.5 HOUSE_HUNT_R=300 sim/par.sh mine 5 700 3         # 3 workers x 5 matches
+node sim/run.ts --bot=mine --matches=5 --seed=1                     # practice vs house squad (also --bot=example)
+OUT=/tmp/mr sim/batch.sh NAME mine 200 1001 4 --params='{...}'      # 4 workers; timelines in /tmp/mr/NAME.jsonl
+OUT=/tmp/mr sim/ab.sh NAME '{"harvest":true}'                       # paired A/B vs defaults under 3 house models
+python3 sim/analyze.py /tmp/mr/NAME.jsonl                           # killers, fights, accuracy, cubes, loadouts
+python3 sim/analyze.py A.jsonl B.jsonl                              # paired difference by seed, 95% interval
+node sim/run.ts --matches=2 --seed=1001 --trace=t.json && node sim/viz.ts t.json 1001 50 90 out.svg   # map plot
+node sim/run.ts --giveWeapon=laser --giveCubes=3 ...                # oracle: what a resource is worth
+node sim/run.ts --brain=src/brain_v0.ts ...                         # run another brain version (untracked copy)
 node sim/run.ts --mode=ffa --bot=mine --opp=mine --oppParams='{"engageAll":true}'   # self-play FFA A/B
-node sim/run.ts --mode=solo --follow --nonpc --params='{"pacifist":true}'           # zone-only test
-python3 sim/compare.py a.txt b.txt                                  # paired comparison by seed
 node tools/replay.ts stream.jsonl.gz                                # per-tick CPU time on a recorded stream
 ```
+
+The sim passes explicit params to the brain, so it never reads `data/params.json`.
 
 ## License
 
