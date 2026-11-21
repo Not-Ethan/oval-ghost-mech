@@ -84,7 +84,20 @@ Later tests on top of C4 (paired, 200 seeds):
 | laserCrates | −0.07 / 0.00 |
 | roof lasers | +0.07 / +0.06; possession unchanged, 56% → 57% |
 
-## Recommended order (after C7, which is scoring)
+## Built on C10 (real 4.71, the best so far): kill conversion
+
+Real results for C7–C10: C7 kite 4.29, C8 longer range 4.27, C9 exposure weight 4.38, **C10
+targetHit 4.71**. Positioning changes in either direction lost; shot-to-kill conversion won (C4 aim,
+C10 target choice). Positioning stays as in C4.
+
+| # | Commit | What changed (vs C10) | Sim vs C10 (200 paired seeds) | Real-score hypothesis |
+| --- | --- | --- | --- | --- |
+| 11 | c3b91df | **`smartReload`**: reload when the target is behind cover or beyond gun range with half a magazine or less, or when there's no target and the magazine is half empty, and top up whenever nobody is visible. Before: only below 60% with nobody visible. | +0.09 ± 0.15 (M1s); M1 pending | **Fewer reloads start mid-duel.** The gun's 2.4 s reload is about 45% of its duty cycle. Moving reloads into gaps converts more of each duel into damage. |
+
+Tried and not submitted: `focus: 2` (sticky target) on C10: +0.01 ± 0.04 (M1s), −0.01 ± 0.05 (M1).
+targetHit already rarely switches targets, so stickiness changes almost nothing.
+
+## Recommended order (superseded: C7–C10 are done)
 
 1. **C8** (longer range): the mirror of the clearest real signal (C6, −0.52).
 2. **C9** (less exposure).
