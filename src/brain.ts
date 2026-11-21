@@ -124,6 +124,7 @@ export type Params = {
   smartReload: boolean // reload during gaps: target not shootable / out of gun range with half a magazine or less, or nobody visible and not full
   chaseHp: number // pursue a wounded enemy (HP fraction below this) that broke line of sight, to finish it before it regenerates (0 = off)
   gunLaserSync: boolean // while the torso swings to the laser's release point, hold the gun if its lead point is more than ~1 target radius away
+  targetRear: boolean // with targetHit: an enemy facing away (we are outside its front arc) takes x1.5 damage, so its time to kill is shorter
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -194,6 +195,7 @@ export const DEFAULT_PARAMS: Params = {
   smartReload: false,
   chaseHp: 0,
   gunLaserSync: false,
+  targetRear: false,
 }
 
 export class Brain {
@@ -1173,7 +1175,12 @@ export class Brain {
         const pg = d > (this.P.maxGunRange ?? 160) ? 0 : pS * strafe + pT * (1 - strafe)
         const gs = gunW?.stats ?? this.wcfg("gun")
         const gunDps = gunW ? ((gs.damage ?? 45) * (gs.mag ?? 12)) / ((gs.mag ?? 12) * (gs.cooldown ?? 0.24) + (gs.reload ?? 2.4)) : 0
-        const dps = gunDps * pg + (hasLaser && d < 275 ? 118 : 0) + (hasLtg && d < 42 ? 200 : 0) + 1
+        let dps = gunDps * pg + (hasLaser && d < 275 ? 118 : 0) + (hasLtg && d < 42 ? 200 : 0) + 1
+        if (this.P.targetRear) {
+          // our shots come from outside its front arc when its torso faces more than 90 degrees away from us
+          const toUs = Math.atan2(y - tr.y, x - tr.x)
+          if (Math.abs(wrap(tr.aimYaw - toUs)) > Math.PI / 2) dps *= this.cfg?.mech?.rear_mult ?? 1.5
+        }
         const ttk = Math.max(0, tr.hp) / dps
         s = -ttk / 2.5
       }
