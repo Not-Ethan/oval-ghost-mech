@@ -110,6 +110,7 @@ export type Params = {
   laserRoof: number // laserHunt also targets lasers on roofs up to this many metres above our feet (0 = ground only); jets up
   regenHold: number // below this HP fraction start no new opportunistic fights and shoot no crates/drones, so regen can start (0 = off)
   finishHp: number // don't evade while the current shootable target is below this HP fraction: finish the kill (0 = off)
+  kite: number // fight spots: reward moving away from the centroid of the other recent threats (strings out a pack; 0 = off)
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -166,6 +167,7 @@ export const DEFAULT_PARAMS: Params = {
   laserRoof: 0,
   regenHold: 0,
   finishHp: 0,
+  kite: 0,
 }
 
 export class Brain {
@@ -923,6 +925,13 @@ export class Brain {
       .sort((a, b) => a.d - b.d)
       .slice(0, 4)
     const zfut = this.zoneAt(o, this.t + 8)
+    // kiting: centroid of the recent threats other than the target
+    let kx = 0, ky = 0, kn = 0
+    if (this.P.kite > 0 && !evade) {
+      for (const q of ths) { if (target && q.tr.id === target.id) continue; if (this.t - q.tr.lastSeen > 6) continue; kx += q.p[0]; ky += q.p[1]; kn++ }
+      if (kn) { kx /= kn; ky /= kn }
+    }
+    const kd0 = kn ? hyp(x - kx, y - ky) : 0
     const cands: Cand[] = []
     const vslow = this.slow > 4
     const rings = vslow ? (evade ? [0, 10, 22, 36] : [0, 8, 16]) : evade ? [0, 8, 16, 26, 38, 52] : [0, 6, 12, 20, 30]
@@ -988,6 +997,7 @@ export class Brain {
           const pref = this.preferredRange(o)
           s -= Math.abs(d - pref) * this.P.rangeW
         }
+        if (kn) s += this.P.kite * Math.max(-15, Math.min(25, hyp(cd.x - kx, cd.y - ky) - kd0)) / 10
       }
       s += this.coverScore(cd.c) * 1.5 - (this.P.rearAware ? arcPen : 0)
       if (this.P.cubeGrab && o.cubes?.length) for (const cu of o.cubes) if (hyp(cu.pos[0] - cd.x, cu.pos[1] - cd.y) < 3.2 && Math.abs(cu.pos[2] - cd.z) < 3) s += 1.5
