@@ -83,6 +83,13 @@ for (let k = 0; k < N; k++) {
   const sim = new Sim(w, nav, cfg, seed, ctrls)
   sim.verbose = verbose
   for (const i of ours) { sim.track.add(i); sim.rec.set(i, []) }
+  // distance from our spawn to the nearest ground / roof laser at match start
+  const laser0: any = { ground: 1e9, roof: 1e9 }
+  for (const p of sim.pickups) if (p.kind === "laser") {
+    const d = Math.hypot(p.x - sim.mechs[ours[0]].x, p.y - sim.mechs[ours[0]].y)
+    const roof = Math.abs(p.z - w.groundHeight(p.x, p.y)) > 2.5
+    if (roof) laser0.roof = Math.min(laser0.roof, Math.round(d)); else laser0.ground = Math.min(laser0.ground, Math.round(d))
+  }
   // house variant: these tiers start with a laser (H_LASER_TIERS=hard,expert), like the real recorded enemy
   const lt = (process.env.H_LASER_TIERS ?? "").split(",").filter(Boolean)
   if (lt.length) for (const m of sim.mechs) if (m.ctrl.squad && lt.some((t) => m.ctrl.name === "house-" + t)) m.weapons[1] = sim.newWeapon("laser")
@@ -109,7 +116,9 @@ for (let k = 0; k < N; k++) {
     sim.sampleExtra = (id: number) => {
       const me = sim.mechs[id]
       const hd = [...S.hunters].map((h) => sim.mechs[h]).filter((m) => m && m.alive).map((m) => Math.round(Math.hypot(m.x - me.x, m.y - me.y))).sort((a, b) => a - b)
-      return { mode: brain?.mode ?? "", tgt: brain?.lastTargetId ?? -1, hunters: hd.length, hd: hd.slice(0, 6), ammo: me.weapons[0]?.ammo ?? -1 }
+      let lk = 0
+      if (brain?.pickMem) for (const q of brain.pickMem.values()) if (q.kind === "laser") { lk = 1; break }
+      return { mode: brain?.mode ?? "", tgt: brain?.lastTargetId ?? -1, hunters: hd.length, hd: hd.slice(0, 6), ammo: me.weapons[0]?.ammo ?? -1, lk }
     }
   }
   if (sq) sq.oracle = () => sim.mechs.filter((m) => m.alive && !m.ctrl.squad).map((m) => ({ id: m.id, pos: [m.x, m.y, m.z], vel: [m.vx, m.vy, m.vz] }))
@@ -131,7 +140,7 @@ for (let k = 0; k < N; k++) {
   const i0 = ours[0]
   if (args.out) {
     const m0 = sim.mechs[i0]
-    appendFileSync(args.out, JSON.stringify({ seed, slot: i0, bot: botKind, params: args.params ?? null, place: res.places[i0], kills: res.kills[i0], deathT: res.deathT[i0], endT: res.t, cubes: m0.cubes, upgrades: m0.upgrades, weapons: m0.weapons.map((q) => q?.kind ?? null), wst: m0.wst, dealt: res.dmgDealt[i0], taken: res.dmgTaken[i0], deaths: sim.deathLog, houseWst: (() => { const o: any = {}; for (const m of sim.mechs) if (m.ctrl.squad) { const k = m.ctrl.name; o[k] ??= {}; for (const [w, v] of Object.entries(m.wst)) { o[k][w] ??= { shots: 0, hits: 0, dmg: 0 }; o[k][w].shots += v.shots; o[k][w].hits += v.hits; o[k][w].dmg += Math.round(v.dmg) } } return o })(), rec: sim.rec.get(i0) }) + "\n")
+    appendFileSync(args.out, JSON.stringify({ seed, slot: i0, bot: botKind, params: args.params ?? null, place: res.places[i0], kills: res.kills[i0], deathT: res.deathT[i0], endT: res.t, cubes: m0.cubes, upgrades: m0.upgrades, weapons: m0.weapons.map((q) => q?.kind ?? null), wst: m0.wst, dealt: res.dmgDealt[i0], taken: res.dmgTaken[i0], laser0: laser0, deaths: sim.deathLog, houseWst: (() => { const o: any = {}; for (const m of sim.mechs) if (m.ctrl.squad) { const k = m.ctrl.name; o[k] ??= {}; for (const [w, v] of Object.entries(m.wst)) { o[k][w] ??= { shots: 0, hits: 0, dmg: 0 }; o[k][w].shots += v.shots; o[k][w].hits += v.hits; o[k][w].dmg += Math.round(v.dmg) } } return o })(), rec: sim.rec.get(i0) }) + "\n")
   }
   const hk = res.places.map((p, i) => i).filter((i) => !ours.includes(i))
   console.log(`match ${k} seed ${seed}: place ${ours.map((i) => res.places[i]).join(",")} kills ${ours.map((i) => res.kills[i]).join(",")} death ${ours.map((i) => res.deathT[i].toFixed(0)).join(",")} dealt ${res.dmgDealt[i0]} taken ${res.dmgTaken[i0]} | end t=${res.t.toFixed(0)} houseDead=${hk.filter((i) => res.deathT[i] >= 0).length} acc ${res.acc[i0]} houseAcc ${hk.map((i) => res.acc[i]).filter((a) => !a.startsWith('0/0')).slice(0, 4).join(' ')} (${(ms / 1000).toFixed(1)}s) act avg ${avgMs.toFixed(2)}ms max ${maxMs.toFixed(1)}ms`)

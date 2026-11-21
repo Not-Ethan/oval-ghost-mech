@@ -111,6 +111,8 @@ export type Params = {
   regenHold: number // below this HP fraction start no new opportunistic fights and shoot no crates/drones, so regen can start (0 = off)
   finishHp: number // don't evade while the current shootable target is below this HP fraction: finish the kill (0 = off)
   kite: number // fight spots: reward moving away from the centroid of the other recent threats (strings out a pack; 0 = off)
+  laserHp: number // laserHunt only above this HP fraction
+  scoutT: number // until this match time, with no laser known and no enemy visible: walk to the most open spot within ~60 m and sweep (0 = off)
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -168,6 +170,8 @@ export const DEFAULT_PARAMS: Params = {
   regenHold: 0,
   finishHp: 0,
   kite: 0,
+  laserHp: 0.45,
+  scoutT: 0,
 }
 
 export class Brain {
@@ -191,6 +195,8 @@ export class Brain {
   sweepT0 = -99
   laserFullSince = -1
   crateGoal: any = null
+  scoutSpot: number[] | null = null
+  scoutSweepT = -1
   sweepYaw0 = 0
   lastTargetT = -99
   // movement
@@ -360,7 +366,7 @@ export class Brain {
     this.dest = null; this.destT = -99; this.hold = null; this.holdKey = ""; this.stuckT = 0; this.mode = "init"
     this.dmgWindow = []; this.threatBearings = []; this.sounds = []; this.lastDamagedT = -99; this.lastDealtT = -99
     this.dfieldT = -99; this.timeStats = { n: 0, max: 0, sum: 0 }; this.jukeT = 0; this.scanT = 0; this.scanStartYaw = null; this.recovering = false; this.npcAggro = null; this.hpHist.clear(); this.directMode = false
-    this.crates.clear(); this.pickMem.clear(); this.harvests = []; this.farmId = -1; this.farmBan.clear(); this.relocTarget = null; this.relocUntil = 0; this.relocT = -99; this.ffaEvidence = 0; this.ffaDetectedAt = -1; this.ourHits.clear()
+    this.crates.clear(); this.pickMem.clear(); this.harvests = []; this.scoutSpot = null; this.scoutSweepT = -1; this.farmId = -1; this.farmBan.clear(); this.relocTarget = null; this.relocUntil = 0; this.relocT = -99; this.ffaEvidence = 0; this.ffaDetectedAt = -1; this.ourHits.clear()
   }
 
   // ------------------------------------------------------------------ helpers
@@ -480,11 +486,15 @@ export class Brain {
     // light pressure (one shooter, little damage): breaking line of sight to reload costs more uptime than it saves
     if (dry && this.P.dryHold && visible.length <= 1 && recentDmg < maxHp * 0.08 && hpFrac > 0.5) dry = false
     const nearFoes = this.P.laserSafe ? threats.filter((tr) => this.t - tr.lastSeen < 3) : visible
-    if (!dest && this.P.laserHunt && !me.weapons.some((w: any) => w && w.kind === "laser") && hpFrac > 0.45 && !nearFoes.some((tr) => hyp(tr.x - x, tr.y - y) < this.P.laserNear) && !(this.P.laserSafe && this.t - this.lastDamagedT < 2)) {
+    if (!dest && this.P.laserHunt && !me.weapons.some((w: any) => w && w.kind === "laser") && hpFrac > this.P.laserHp && !nearFoes.some((tr) => hyp(tr.x - x, tr.y - y) < this.P.laserNear) && !(this.P.laserSafe && this.t - this.lastDamagedT < 2)) {
       const lp = this.laserGoal(o)
       if (lp) { dest = lp; why = "laser" }
     }
     this.crateGoal = null
+    if (!dest && this.P.scoutT > 0 && this.t < this.P.scoutT && this.P.lootMem && !me.weapons.some((w: any) => w && w.kind === "laser") && !this.laserGoal(o) && visible.length === 0) {
+      const sg = this.scoutGoal(o)
+      if (sg) { dest = sg; why = "scout" }
+    }
     if (!dest && this.P.laserCrates && this.P.laserHunt && !me.weapons.some((w: any) => w && w.kind === "laser") && hpFrac > 0.45 && !nearFoes.some((tr) => hyp(tr.x - x, tr.y - y) < this.P.laserNear) && !this.laserGoal(o)) {
       const cg = this.laserCrateGoal(o)
       if (cg) { dest = cg; why = "lcrate" }
@@ -1131,6 +1141,30 @@ export class Brain {
     return best
   }
 
+  // the most open reachable spot near spawn (long sight lines reveal pickups behind nearby buildings);
+  // chosen once, then a full sweep on arrival
+  scoutGoal(o: any): number[] | null {
+    const [x, y] = o.self.pos
+    if (!this.scoutSpot) {
+      let best: number[] | null = null, bs = -Infinity
+      const me0 = this.nav.cellAt(x, y)
+      const open0 = me0 >= 0 && this.nav.walk[me0] ? this.cover.openOf(me0) : 0
+      for (const r of [20, 35, 50, 65]) for (let k = 0; k < 12; k++) {
+        const a = (k * TAU) / 12
+        const c = this.nav.nearestMain(x + Math.cos(a) * r, y + Math.sin(a) * r, 6)
+        if (c < 0) continue
+        const sc = this.cover.openOf(c) - r / 400
+        if (sc > bs) { bs = sc; best = [this.nav.cx(c), this.nav.cy(c), this.cover.openOf(c)] }
+      }
+      // not worth walking unless clearly more open than here
+      this.scoutSpot = best && best[2] > open0 + 0.08 ? best : [x, y, open0]
+    }
+    const sp = this.scoutSpot
+    if (hyp(sp[0] - x, sp[1] - y) > 3) return [sp[0], sp[1]]
+    if (this.scoutSweepT < 0) this.scoutSweepT = this.t
+    return this.t - this.scoutSweepT < 2.2 ? [x, y] : null
+  }
+
   // nearest remembered ground crate; when close with a clear shot, stand and shoot it (aimAndFire uses crateGoal)
   laserCrateGoal(o: any): number[] | null {
     const [x, y, z] = o.self.pos
@@ -1759,6 +1793,9 @@ export class Brain {
     if (o.t < 2.0 && threats.length === 0) {
       if (this.scanStartYaw === null) this.scanStartYaw = me.aim[0]
       return wrap(this.scanStartYaw + Math.min(TAU, (o.t + 0.15) * (me.stats?.turn_rate ?? 4)))
+    }
+    if (this.mode === "scout" && this.scoutSweepT >= 0) {
+      return wrap(me.aim[0] + 1.2)
     }
     // periodic sweep while quiet: finds loot (and enemies) behind us
     if (this.P.scanEvery > 0 && !threats.some((tr) => this.t - tr.lastSeen < 8) && this.t - this.lastDamagedT > 8) {
