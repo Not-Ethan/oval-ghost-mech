@@ -69,3 +69,26 @@ it** before reading differences under about 0.3.
 | laserSafe | −0.05 |
 | rearAware (on candidate 2) | −0.03 |
 | attackersOnly (ignore idle bots) | −0.29 / −0.23 / −0.15 |
+
+Later tests on top of C4 (paired, 200 seeds):
+
+| Idea | Effect |
+| --- | --- |
+| faster juke (0.25 + 0.4 s) | −0.04 (M1r), −0.19 (M1s) |
+| maxGunRange 120 | −0.04 (M1r) |
+| laser dodge | −0.04 (M1r, hard/expert carry lasers) |
+| no-mortar loadout | −0.12 (M1r), +0.12 (M1s) |
+| combo (kite + finishHp 0.3 + laserRoof 35 + harvestMaxVis 0) | +0.11 (M1s), +0.14 (M1), −0.01 (M1r) |
+| leadMC (sampled strafe futures) | +0.02 (M1s); also no better than leadAdapt in the gallery |
+| scouting for lasers | −0.17 / −0.21; it lowers laser possession |
+| laserCrates | −0.07 / 0.00 |
+| roof lasers | +0.07 / +0.06; possession unchanged, 56% → 57% |
+
+## Recommended order (after C7, which is scoring)
+
+1. **C8** (longer range): the mirror of the clearest real signal (C6, −0.52).
+2. **C9** (less exposure).
+3. **C10** (aim-aware target choice).
+
+Each is a single change on C4, so with ±0.06 run-to-run noise each result is readable. Then combine
+the winners. The branch tip's `data/params.json` is C4 (the best real configuration).
