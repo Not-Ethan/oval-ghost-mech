@@ -97,6 +97,10 @@ export type Params = {
   laserSafe: boolean // laserHunt also holds off for enemies seen in the last 3 s (not only visible ones) and recent damage
   laserEngageR: number // holding a laser: open fire on any shootable visible enemy within this range (0 = off)
   laserHold: boolean // a full charge whose target just broke line of sight is held (up to the auto-fire limit) instead of released into cover
+  dropsAgg: boolean // go for supply drops (full HP + 3 cubes) within dropR m even with enemies around, unless 2+ are visible within 60 m
+  dropR: number // ... within this distance
+  laserCrates: boolean // no laser held or known: break remembered ground crates within 150 m (1 in 6 holds a laser)
+  harvestW: boolean // harvest also goes for a laser dropped at the kill spot when we hold none (needs lootMem)
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -146,6 +150,10 @@ export const DEFAULT_PARAMS: Params = {
   laserSafe: false,
   laserEngageR: 0,
   laserHold: false,
+  dropsAgg: false,
+  dropR: 220,
+  laserCrates: false,
+  harvestW: false,
 }
 
 export class Brain {
@@ -168,6 +176,7 @@ export class Brain {
   lastTargetId = -1
   sweepT0 = -99
   laserFullSince = -1
+  crateGoal: any = null
   sweepYaw0 = 0
   lastTargetT = -99
   // movement
@@ -461,6 +470,15 @@ export class Brain {
       const lp = this.laserGoal(o)
       if (lp) { dest = lp; why = "laser" }
     }
+    this.crateGoal = null
+    if (!dest && this.P.laserCrates && this.P.laserHunt && !me.weapons.some((w: any) => w && w.kind === "laser") && hpFrac > 0.45 && !nearFoes.some((tr) => hyp(tr.x - x, tr.y - y) < this.P.laserNear) && !this.laserGoal(o)) {
+      const cg = this.laserCrateGoal(o)
+      if (cg) { dest = cg; why = "lcrate" }
+    }
+    if (!dest && this.P.dropsAgg && o.drops?.length) {
+      const dg = this.dropGoal(o, visible, hpFrac)
+      if (dg) { dest = dg; why = "drop" }
+    }
     if (!dest && this.P.harvest && this.harvests.length) {
       const h = this.harvestGoal(o, visible, hpFrac)
       if (h) { dest = h; why = "harvest" }
@@ -537,7 +555,7 @@ export class Brain {
       if (dd > 1.5) mv = this.steer(o, dest)
     }
     // juke when visible enemies can shoot us
-    if (engaged && why !== "zone") {
+    if (engaged && why !== "zone" && why !== "drop") {
       if (this.t > this.jukeT) { this.jukeDir = this.rand() < 0.5 ? -1 : 1; this.jukeT = this.t + this.P.jukeMin + this.rand() * this.P.jukeVar }
       const ref = target ?? visible[0]
       const ang = Math.atan2(ref.y - y, ref.x - x) + (this.jukeDir * Math.PI) / 2
@@ -1088,6 +1106,48 @@ export class Brain {
     return best
   }
 
+  // nearest remembered ground crate; when close with a clear shot, stand and shoot it (aimAndFire uses crateGoal)
+  laserCrateGoal(o: any): number[] | null {
+    const [x, y, z] = o.self.pos
+    const zf = this.zoneAt(o, this.t + 15)
+    let best: any = null, bd = 150, bid = -1
+    for (const [id, c] of this.crates) {
+      if (this.farmBan.has(id)) continue
+      if (Math.abs(c.z - this.nav.surfAt(c.x, c.y)) > 2.5) continue
+      if (hyp(c.x - zf.cx, c.y - zf.cy) > zf.r - 12) continue
+      const d = hyp(c.x - x, c.y - y)
+      if (d < bd) { bd = d; best = c; bid = id }
+    }
+    if (!best) return null
+    if (bid !== this.farmId) { this.farmId = bid; this.farmSince = this.t }
+    else if (this.t - this.farmSince > 25) { this.farmBan.add(bid); this.farmId = -1; return null }
+    const muz = z + (o.self.stats?.muzzle_height ?? 7)
+    if (bd < 28 && this.w.shotClear(x, y, muz, best.x, best.y, best.z + 1.2)) { this.crateGoal = best; return [x, y] }
+    return [best.x, best.y]
+  }
+
+  // a supply drop worth taking now: landed (or landing by the time we arrive), inside the zone, not held by
+  // another mech, and not contested by 2+ visible enemies near us; stand at its centre to capture it
+  dropGoal(o: any, visible: Track[], hpFrac: number): number[] | null {
+    const me = o.self
+    const [x, y] = me.pos
+    if (hpFrac > 0.97 && (me.cubes ?? 0) >= 10) return null
+    if (visible.filter((tr) => hyp(tr.x - x, tr.y - y) < 60).length >= 2) return null
+    const zf = this.zoneAt(o, this.t + 10)
+    let best: number[] | null = null, bd = this.P.dropR
+    for (const d of o.drops ?? []) {
+      if (d.holder !== null && d.holder !== undefined && d.holder !== me.id) continue
+      const dd = hyp(d.pos[0] - x, d.pos[1] - y)
+      if (dd > bd || d.lands_in > dd / 13 + 3) continue
+      if (hyp(d.pos[0] - zf.cx, d.pos[1] - zf.cy) > zf.r - 6) continue
+      const c = this.nav.nearestMain(d.pos[0], d.pos[1], 6)
+      if (c < 0 || hyp(this.nav.cx(c) - d.pos[0], this.nav.cy(c) - d.pos[1]) > (d.radius ?? 8) - 2) continue
+      bd = dd
+      best = [this.nav.cx(c), this.nav.cy(c)]
+    }
+    return best
+  }
+
   // nearest remembered laser on the ground (not on a roof) that stays inside the zone
   laserGoal(o: any): number[] | null {
     const [x, y, z] = o.self.pos
@@ -1114,6 +1174,8 @@ export class Brain {
       const h = this.harvests[i]
       const dh = hyp(h.x - x, h.y - y)
       const near = (o.cubes ?? []).filter((c: any) => hyp(c.pos[0] - h.x, c.pos[1] - h.y) < 9 && Math.abs(c.pos[2] - h.z) < 4)
+      if (this.P.harvestW && !o.self.weapons.some((w: any) => w && w.kind === "laser"))
+        for (const p of this.pickMem.values()) if (p.kind === "laser" && hyp(p.pos[0] - h.x, p.pos[1] - h.y) < 8 && Math.abs(p.pos[2] - h.z) < 4) near.push(p)
       // done: close enough to see the spot and nothing left there (or it is outside the zone soon)
       if ((dh < 14 && near.length === 0 && this.t - h.t > 0.5) || hyp(h.x - zf.cx, h.y - zf.cy) > zf.r - 3) { this.harvests.splice(i, 1); continue }
       let tx = h.x, ty = h.y, td = dh
@@ -1481,6 +1543,8 @@ export class Brain {
       const npc = this.aggroNpc(o)
       if (npc) { tgtPt = [npc.pos[0], npc.pos[1], npc.pos[2] + 1.75]; tgtVel = [npc.vel[0], npc.vel[1], 0]; tgtR = 1.8 }
       else { a.aim = [this.npcAggro.b, 0]; return }
+    } else if (why === "lcrate" && this.crateGoal) {
+      tgtPt = [this.crateGoal.x, this.crateGoal.y, this.crateGoal.z + 1.2]; tgtR = 1.4
     } else if (this.P.lootNoise && (o.t < this.P.lootNoiseUntil || (this.P.farm && (me.cubes ?? 0) < this.P.farmMaxCubes)) && !this.recovering && why !== "alert" && !threats.some((tr) => this.t - tr.lastSeen < (this.P.farm ? this.P.farmQuiet : 20))) {
       const npc = this.npcTarget(o, threats)
       if (npc) { tgtPt = [npc.pos[0], npc.pos[1], npc.pos[2] + 1.75]; tgtVel = [npc.vel[0], npc.vel[1], 0]; tgtR = 1.8 }

@@ -58,6 +58,21 @@ Two more variants fit with the same knobs and no retuning:
 Each residual is under 0.11, inside the sim's own noise. A real 48-match score probably carries about
 ±0.3–0.4 (95%) of noise as well.
 
+## Check against the first two candidates (real points 5 and 6)
+
+| Candidate | Real | M1 | M1b | M1s | M1r |
+| --- | --- | --- | --- | --- | --- |
+| C1 (`lootMem` + `laserHunt`) vs defaults | +0.79 (3.83) | +0.36 ± 0.16 | +0.35 ± 0.18 | +0.41 ± 0.16 | +0.17 ± 0.16 |
+| C2 vs C1 (harvest, mortarUse, gun loadout, dmg upgrades, dryHold) | +0.46 (4.29) | +0.28 ± 0.18 | +0.38 ± 0.18 | +0.38 ± 0.16 | n/a |
+
+The sim got the sign right both times but underrated the size. It underrated laser value by about 2×.
+M1r (long-range, laser-armed hunters) is further off, so it is not a better model of laser value.
+Working rule: treat sim gains as direction and rough size, expect real gains of about 1.3–2× for
+laser and power-growth changes, and keep M1 and M1s as the main models. A plausible reason:
+against real strafing bots our gun is weaker than in the sim (89% hit rate), while the hitscan laser
+is not. A real house that is weaker than the sim's would also fit, since the house was re-fitted to
+our gun-only score.
+
 ## How it was fitted, and what was rejected
 
 1. The old model had every member hunting within range. It gave defaults 2.36, example 0.55 and
