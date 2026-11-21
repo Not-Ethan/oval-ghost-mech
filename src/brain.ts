@@ -117,6 +117,10 @@ export type Params = {
   fireMinP: number // with leadMC: fire the gun only when the estimated hit chance of the shot is at least this (0 = off)
   leadMCMean: boolean // leadMC aims at the mean of the sampled futures instead of the densest window
   targetHit: boolean // choose the target with the shortest estimated time to kill (gun hit chance by range and strafing, laser hitscan)
+  prefGun: number // preferred fighting range with a gun (no laser/lightning)
+  prefLaser: number // preferred fighting range with a laser (no lightning)
+  expW: number // fight spots: penalty per unit of exposure to threats other than the target
+  prefLtg: number // preferred fighting range with lightning
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -180,6 +184,10 @@ export const DEFAULT_PARAMS: Params = {
   fireMinP: 0,
   leadMCMean: false,
   targetHit: false,
+  prefGun: 75,
+  prefLaser: 110,
+  expW: 4,
+  prefLtg: 35,
 }
 
 export class Brain {
@@ -1014,7 +1022,7 @@ export class Brain {
         if (ths.length) s += Math.min(80, hyp(cd.x - ths[0].p[0], cd.y - ths[0].p[1])) * 0.03
       } else {
         // fight: want to see the target but be exposed to as few others as possible
-        s -= Math.max(0, exp - canHit) * 4
+        s -= Math.max(0, exp - canHit) * this.P.expW
         s += canHit * 3
         if (target) {
           const d = hyp(cd.x - target.x, cd.y - target.y)
@@ -1080,9 +1088,9 @@ export class Brain {
 
   preferredRange(o: any): number {
     const ws = o.self.weapons.filter((w: any) => w).map((w: any) => w.kind)
-    if (ws.includes("lightning")) return 35
-    if (ws.includes("laser")) return 110
-    return 75
+    if (ws.includes("lightning")) return this.P.prefLtg
+    if (ws.includes("laser")) return this.P.prefLaser
+    return this.P.prefGun
   }
 
   // is this enemy engaging us (or about to)?
