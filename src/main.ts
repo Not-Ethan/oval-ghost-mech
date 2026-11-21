@@ -12,9 +12,36 @@ let errors = 0
 let lastMove: [number, number] = [0, 0]
 let lastAim: [number, number] | null = null
 
-function fallback(tick: number) {
+// Minimal policy used only if the main brain is unavailable or throws: stay in the zone, shoot the nearest mech.
+function fallback(tick: number, o: any = null) {
   const a: any = { tick, move: lastMove }
   if (lastAim) a.aim = lastAim
+  try {
+    if (!o) return a
+    const [x, y, z] = o.self.pos
+    const zn = o.zone
+    const g = zn.next_center
+    const d = Math.hypot(g[0] - x, g[1] - y)
+    const inner = d < zn.next_radius * 0.5
+    a.move = inner || d < 1 ? [0, 0] : [(g[0] - x) / d, (g[1] - y) / d]
+    a.boost = !o.self.in_zone
+    a.aim = [Math.atan2(g[1] - y, g[0] - x), 0]
+    let best: any = null, bd = 160
+    for (const m of o.mechs ?? []) {
+      if (m.kind !== "mech") continue
+      const dm = Math.hypot(m.pos[0] - x, m.pos[1] - y)
+      if (dm < bd) { bd = dm; best = m }
+    }
+    if (best) {
+      a.aim = [Math.atan2(best.pos[1] - y, best.pos[0] - x), Math.atan2(best.pos[2] + 4.5 - (z + 7), bd)]
+      a.fire = [true, true]
+    }
+    if (o.offer) a.pick = 0
+    const near = (o.pickups ?? []).find((p: any) => Math.hypot(p.pos[0] - x, p.pos[1] - y) < 3.6)
+    if (near && !o.self.weapons?.[1] && near.kind !== "gun") a.take = near.id
+    if (Array.isArray(a.move)) lastMove = a.move
+    lastAim = a.aim
+  } catch {}
   return a
 }
 
@@ -69,13 +96,13 @@ function handle(lines: string[]) {
   const tick = latest.tick
   let action: any
   try {
-    action = brain ? sanitize(brain.act(latest), tick) : fallback(tick)
+    action = brain ? sanitize(brain.act(latest), tick) : sanitize(fallback(tick, latest), tick)
     if (action.move) lastMove = action.move
     if (action.aim) lastAim = action.aim
   } catch (e) {
     errors++
     if (errors <= 5 || errors % 100 === 0) log(`act failed at tick ${tick} (${errors}):`, (e as any)?.stack ?? e)
-    action = fallback(tick)
+    action = sanitize(fallback(tick, latest), tick)
   }
   send(action)
 }

@@ -34,8 +34,8 @@ export class Nav {
   fny: number
   fx0: number
   fy0: number
-  clear: Float32Array // distance (m) to nearest obstacle sample
-  fz: Float32Array // walker surface height
+  clearQ: Uint8Array // distance to nearest obstacle sample, decimeters (floor, capped 25.5 m)
+  fzQ: Int16Array // walker surface height, centimeters
   // nav grid (2 m), cell (I,J) at fine sample (2I, 2J)
   nx: number
   ny: number
@@ -60,7 +60,7 @@ export class Nav {
   stepUp: number
   height: number
 
-  constructor(w: World, radius = 2.5, height = 9, stepUp = 1.2, maxSlopeDeg = 50, cached: { fz: Float32Array; clear: Float32Array } | null = null) {
+  constructor(w: World, radius = 2.5, height = 9, stepUp = 1.2, maxSlopeDeg = 50, cached: { fzQ: Int16Array; clearQ: Uint8Array; comp?: Int32Array | null } | null = null) {
     this.w = w
     this.radius = radius
     this.stepUp = stepUp
@@ -70,13 +70,15 @@ export class Nav {
     this.fnx = w.tnx - 1
     this.fny = w.tny - 1
     const N = this.fnx * this.fny
-    if (cached && cached.fz.length === N && cached.clear.length === N) {
-      this.fz = cached.fz
-      this.clear = cached.clear
+    const useCache = !!cached && cached.fzQ.length === N && cached.clearQ.length === N
+    if (useCache) {
+      this.fzQ = cached!.fzQ
+      this.clearQ = cached!.clearQ
     } else {
       const r = Nav.raster(w, this.fnx, this.fny, this.fx0, this.fy0, height, stepUp, maxSlopeDeg)
-      this.fz = r.fz
-      this.clear = r.clear
+      this.fzQ = new Int16Array(N)
+      this.clearQ = new Uint8Array(N)
+      for (let i = 0; i < N; i++) { this.fzQ[i] = Math.round(r.fz[i] * 100); this.clearQ[i] = Math.min(255, Math.floor(r.clear[i] * 10)) }
     }
     this.nx = Math.floor((this.fnx + 1) / 2)
     this.ny = Math.floor((this.fny + 1) / 2)
@@ -91,9 +93,9 @@ export class Nav {
       for (let I = 0; I < this.nx; I++) {
         const k = 2 * J * this.fnx + 2 * I
         const c = J * this.nx + I
-        this.z[c] = this.fz[k]
-        this.cellClear[c] = this.clear[k]
-        this.walk[c] = this.clear[k] >= need ? 1 : 0
+        this.z[c] = this.fzQ[k] * 0.01
+        this.cellClear[c] = this.clearQ[k] * 0.1
+        this.walk[c] = this.cellClear[c] >= need ? 1 : 0
       }
     this.g = new Float32Array(M)
     this.parent = new Int32Array(M)
@@ -101,7 +103,15 @@ export class Nav {
     this.closedStamp = new Uint32Array(M)
     this.heap = new Int32Array(M * 4 + 8)
     this.heapF = new Float32Array(M * 4 + 8)
-    this.labelComponents()
+    const cc = useCache ? cached!.comp : null
+    if (cc && cc.length === M && Math.abs(radius - 2.5) < 1e-9) {
+      this.comp = cc
+      const sizes = new Map<number, number>()
+      for (let c = 0; c < M; c++) if (cc[c] >= 0) sizes.set(cc[c], (sizes.get(cc[c]) ?? 0) + 1)
+      let best = -1, bs = 0
+      for (const [k, v] of sizes) if (v > bs) { bs = v; best = k }
+      this.mainComp = best
+    } else this.labelComponents()
   }
 
   // connected components of walkable cells (8-neighbour, |dz| within step limits); largest is "main"
@@ -136,6 +146,15 @@ export class Nav {
       if (qt > bestSize) { bestSize = qt; this.mainComp = label }
       label++
     }
+  }
+
+  // re-derive walkability for a different mech radius (mechs grow with cubes)
+  setRadius(radius: number) {
+    if (Math.abs(radius - this.radius) < 0.05) return
+    this.radius = radius
+    const need = radius + 0.35
+    for (let c = 0; c < this.walk.length; c++) this.walk[c] = this.cellClear[c] >= need ? 1 : 0
+    this.labelComponents()
   }
 
   inMain(c: number): boolean { return c >= 0 && this.walk[c] === 1 && this.comp[c] === this.mainComp }
@@ -232,12 +251,12 @@ export class Nav {
   clearanceAt(x: number, y: number): number {
     const i = Math.round(x - this.fx0), j = Math.round(y - this.fy0)
     if (i < 0 || j < 0 || i >= this.fnx || j >= this.fny) return 0
-    return this.clear[j * this.fnx + i]
+    return this.clearQ[j * this.fnx + i] * 0.1
   }
   surfAt(x: number, y: number): number {
     const i = Math.round(x - this.fx0), j = Math.round(y - this.fy0)
     if (i < 0 || j < 0 || i >= this.fnx || j >= this.fny) return 0
-    return this.fz[j * this.fnx + i]
+    return this.fzQ[j * this.fnx + i] * 0.01
   }
 
   walkable(c: number): boolean { return c >= 0 && this.walk[c] === 1 }

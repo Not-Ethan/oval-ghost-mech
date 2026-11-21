@@ -4,6 +4,7 @@ import { Nav } from "./nav.ts"
 import { Cover } from "./cover.ts"
 import { loadCache, mapHashOf } from "./mapcache.ts"
 import { fileURLToPath } from "node:url"
+import { existsSync, readFileSync } from "node:fs"
 
 const TAU = Math.PI * 2
 const wrap = (a: number) => { a = (a + Math.PI) % TAU; if (a < 0) a += TAU; return a - Math.PI }
@@ -41,6 +42,14 @@ export type Params = {
   recoverHi: number // recovered above this
   maxGunRange: number
   lonelyDuelRange: number // engage a lone enemy within this range
+  engageRange: number // engage any shootable visible enemy within this range when healthy and few are visible
+  lootNoiseUntil: number // only farm crates/drones before this match time
+  relocate: boolean // after contact, move well away from where threats last saw us
+  ffaEngageRange: number // engage range once we see other mechs fighting each other (free-for-all)
+  engageAllUntilFfa: boolean // engage every visible enemy until we see others fighting each other
+  fireSlack: number // extra aim error allowed for the gun, as a fraction of one tick of torso slew
+  rearAware: boolean // keep active shooters in the front arc when choosing targets / spots
+  drops: boolean // go for supply drops when uncontested
   pacifist?: boolean // testing only: never fire
 }
 
@@ -51,6 +60,14 @@ export const DEFAULT_PARAMS: Params = {
   recoverHi: 0.85,
   maxGunRange: 160,
   lonelyDuelRange: 60,
+  engageRange: 110,
+  lootNoiseUntil: 60,
+  relocate: true,
+  ffaEngageRange: 60,
+  engageAllUntilFfa: false,
+  fireSlack: 0.25,
+  rearAware: false,
+  drops: true,
 }
 
 export class Brain {
@@ -110,7 +127,21 @@ export class Brain {
 
   constructor(opts: BrainOpts) {
     this.opts = opts
-    this.P = { ...DEFAULT_PARAMS, ...(opts.params ?? {}) }
+    // optional overrides: data/params.json (for quick A/B variants without code edits)
+    let fileParams: any = {}
+    if (!opts.params) {
+      try {
+        const f = fileURLToPath(new URL("../data/params.json", import.meta.url))
+        if (existsSync(f)) {
+          const j = JSON.parse(readFileSync(f, "utf8"))
+          if (j && typeof j === "object") for (const k of Object.keys(j)) if (k in DEFAULT_PARAMS && typeof j[k] === typeof (DEFAULT_PARAMS as any)[k]) fileParams[k] = j[k]
+          process.stderr.write("params override: " + JSON.stringify(fileParams) + "\n")
+        }
+      } catch (e) {
+        process.stderr.write("params.json ignored: " + e + "\n")
+      }
+    }
+    this.P = { ...DEFAULT_PARAMS, ...fileParams, ...(opts.params ?? {}) }
     if (opts.world) this.w = opts.world
     if (opts.nav) this.nav = opts.nav
     this.debugOn = !!opts.debug
@@ -126,27 +157,61 @@ export class Brain {
     this.slot = h.slot
     this.rs = (h.seed >>> 0) || 1
     const dir = h.map?.dir ?? this.opts.mapDir ?? "/arena"
+    const T0 = performance.now()
+    const ph: string[] = []
+    const lap = (name: string) => ph.push(`${name} ${(performance.now() - T0).toFixed(0)}`)
     let cache = null
     try {
       const file = fileURLToPath(new URL("../data/map.bin", import.meta.url))
-      cache = loadCache(file, mapHashOf(dir))
+      const hash = mapHashOf(dir)
+      lap("hash")
+      cache = loadCache(file, hash)
+      lap("cache")
       if (!cache) process.stderr.write("map cache missing or map changed: computing at startup\n")
     } catch (e) {
       process.stderr.write("map cache load failed: " + e + "\n")
     }
     if (!this.w) this.w = World.load(dir, cache?.blockMax ?? null)
+    lap("world")
     if (!this.nav) {
+      this.ownsNav = true
       const m = this.cfg?.mech ?? {}
-      this.nav = new Nav(this.w, m.radius ?? 2.5, m.height ?? 9, m.step_up ?? 1.2, m.max_slope_deg ?? 50, cache ? { fz: cache.fz, clear: cache.clear } : null)
+      this.nav = new Nav(this.w, m.radius ?? 2.5, m.height ?? 9, m.step_up ?? 1.2, m.max_slope_deg ?? 50, cache ? { fzQ: cache.fzQ, clearQ: cache.clearQ, comp: cache.comp } : null)
     }
+    lap("nav")
     this.dfield = new Float32Array(this.nav.walk.length)
     this.cover = new Cover(this.w, this.nav)
     if (cache && !this.cover.setData(cache.near, cache.open)) process.stderr.write("cover data size mismatch\n")
+    lap("cover")
+    if (this.ownsNav) process.stderr.write("startup ms: " + ph.join(", ") + "\n")
   }
 
   overBudget(): boolean { return performance.now() > this.deadline }
 
   // Exercise the decision code on synthetic observations so the JIT compiles it before the match.
+  // >1 on slow machines: scales down search effort so ticks stay well inside the 50 ms budget
+  slow = 1
+  benchmark() {
+    // minimum over short runs, so a preempted run on a busy host does not count as "slow"
+    let r = 12345
+    const rnd = () => { r = (r * 1103515245 + 12345) >>> 0; return r / 4294967296 }
+    let best = Infinity
+    for (let run = 0; run < 6; run++) {
+      const t0 = performance.now()
+      for (let i = 0; i < 80; i++) {
+        const ax = -400 + rnd() * 900, ay = -300 + rnd() * 650
+        const bx = ax + (rnd() - 0.5) * 240, by = ay + (rnd() - 0.5) * 240
+        this.w.sees(ax, ay, this.w.groundHeight(ax, ay) + 8, bx, by, this.w.groundHeight(bx, by) + 6, true)
+      }
+      best = Math.min(best, performance.now() - t0)
+    }
+    // about 1 ms per 80 rays on a fast core once compiled
+    this.slow = Math.max(1, Math.min(20, best / 1.0))
+    if (this.slow > 2) this.budgetMs = 4
+    if (this.slow > 4) this.budgetMs = 3
+    return best
+  }
+
   warmup(h: any, ms = 600) {
     const t0 = performance.now()
     const cfg = h.config
@@ -177,11 +242,13 @@ export class Brain {
     } catch (e) {
       process.stderr.write("warmup error: " + ((e as any)?.stack ?? e) + "\n")
     }
+    try { this.benchmark(); process.stderr.write(`speed factor ${this.slow.toFixed(2)}\n`) } catch {}
     // reset match state
     this.tracks.clear(); this.npcs.clear(); this.path = null; this.pathGoal = null; this.pathT = -99
     this.dest = null; this.destT = -99; this.hold = null; this.holdKey = ""; this.stuckT = 0; this.mode = "init"
     this.dmgWindow = []; this.threatBearings = []; this.sounds = []; this.lastDamagedT = -99; this.lastDealtT = -99
-    this.dfieldT = -99; this.timeStats = { n: 0, max: 0, sum: 0 }; this.jukeT = 0; this.scanT = 0
+    this.dfieldT = -99; this.timeStats = { n: 0, max: 0, sum: 0 }; this.jukeT = 0; this.scanT = 0; this.scanStartYaw = null; this.recovering = false; this.npcAggro = null; this.hpHist.clear(); this.directMode = false
+    this.relocTarget = null; this.relocUntil = 0; this.relocT = -99; this.ffaEvidence = 0; this.ffaDetectedAt = -1; this.ourHits.clear()
   }
 
   // ------------------------------------------------------------------ helpers
@@ -237,6 +304,13 @@ export class Brain {
     this.dbg = []
     this.sec = {}
 
+    // mechs grow with cubes: keep the nav grid's clearance in step (only when owning the nav)
+    const rad = typeof me.stats?.radius === "number" ? me.stats.radius : (this.cfg?.mech?.radius ?? 2.5) * (1 + (this.cfg?.cubes?.size_per_cube ?? 0.05) * (me.cubes ?? 0))
+    if (this.ownsNav && typeof rad === "number" && rad > this.nav.radius + 0.2 && performance.now() < this.deadline - 4) {
+      this.nav.setRadius(rad)
+      this.path = null
+      this.hold = null
+    }
     const tP = performance.now()
     this.updateTracks(o)
     this.processEvents(o)
@@ -265,7 +339,8 @@ export class Brain {
     // ---- engagement picture
     const hostile = visible.filter((tr) => this.isThreatening(o, tr))
     const opps = visible.filter((tr) => !hostile.includes(tr) && this.isOpportunity(o, tr, visible.length, hpFrac))
-    const engageSet = this.P.engageAll ? visible : [...hostile, ...opps]
+    const allMode = this.P.engageAll || (this.P.engageAllUntilFfa && this.ffaEvidence < 3)
+    const engageSet = allMode ? visible : [...hostile, ...opps]
     const target = this.chooseTarget(o, engageSet)
     const engaged = engageSet.length > 0
     // recover: hide and regenerate when hurt and nobody is pressing us
@@ -302,14 +377,27 @@ export class Brain {
       } else dest = this.dest
       why = mode
     }
+    if (!dest && this.P.relocate && this.relocTarget && this.t < this.relocUntil && visible.length === 0) {
+      dest = this.relocTarget
+      why = "relocate"
+      if (hyp(dest[0] - x, dest[1] - y) < 4) this.relocUntil = 0
+    }
     if (!dest && recentThreat) {
-      // alert: someone is around but not engaging us; stay low if our spot is hidden
-      const stale = this.t - this.destT > 1.0 || !this.dest || this.destWhy !== "alert"
-      if (stale && (!this.dest || performance.now() < this.deadline - 3)) {
-        dest = this.tacticalSpot(o, threats, true, null)
-        this.destT = this.t
-      } else dest = this.dest
-      why = "alert"
+      // contact broken: relocate away from where they last saw us (if we were in a fight), else stay low
+      const fought = this.t - this.lastDamagedT < 12 || this.t - this.lastDealtT < 12
+      if (this.P.relocate && fought && visible.length === 0 && this.t - this.relocT > 4 && performance.now() < this.deadline - 3) {
+        const r = this.relocateSpot(o, threats)
+        this.relocT = this.t
+        if (r) { this.relocTarget = r; this.relocUntil = this.t + 14; dest = r; why = "relocate" }
+      }
+      if (!dest) {
+        const stale = this.t - this.destT > 1.0 || !this.dest || this.destWhy !== "alert"
+        if (stale && (!this.dest || performance.now() < this.deadline - 3)) {
+          dest = this.tacticalSpot(o, threats, true, null)
+          this.destT = this.t
+        } else dest = this.dest
+        why = "alert"
+      }
     }
     if (!dest && this.npcAggro && this.t - this.npcAggro.t < 2.5 && !this.aggroNpc(o)) {
       // shot by a drone we cannot see: back off out of its reach
@@ -327,6 +415,9 @@ export class Brain {
       this.mark("hold", th)
       why = "hold"
     }
+    // never aim for a spot outside the circle as it will be in a moment (the next circle can touch the
+    // current one's edge, e.g. a final point on the rim): project the destination inside, with margin
+    if (dest) dest = this.projectIntoZone(o, dest, 2)
     this.mark("dest", tS)
     tS = performance.now()
     this.dest = dest
@@ -381,7 +472,10 @@ export class Brain {
   // ------------------------------------------------------------------ tracking
   updateTracks(o: any) {
     for (const tr of this.tracks.values()) tr.visible = false
-    for (const m of o.mechs) {
+    for (const m of o.mechs ?? []) {
+      if (!m || !Array.isArray(m.pos) || m.pos.length < 3) continue
+      if (!Array.isArray(m.vel)) m.vel = [0, 0, 0]
+      if (!Array.isArray(m.aim)) m.aim = [0, 0]
       if (m.kind === "npc") { this.npcs.set(m.id, { ...m, t: o.t }); continue }
       let tr = this.tracks.get(m.id)
       if (!tr) {
@@ -427,6 +521,7 @@ export class Brain {
         }
       } else if (e.type === "hit") {
         this.lastDealtT = o.t
+        if (typeof e.target === "number") this.ourHits.set(e.target, o.t)
       } else if (e.type === "kill") {
         if (this.debugOn) this.dbg.push(`  KILL ${e.target}`)
         this.tracks.delete(e.target)
@@ -437,6 +532,30 @@ export class Brain {
       const dd = s.dist === "near" ? 40 : s.dist === "mid" ? 110 : 220
       this.sounds.push({ t: o.t, b: s.bearing, kind: s.kind, dist: s.dist, x: o.self.pos[0] + Math.cos(s.bearing) * dd, y: o.self.pos[1] + Math.sin(s.bearing) * dd })
     }
+    // free-for-all evidence: other mechs hurting each other
+    if (this.ffaEvidence < 3) {
+      for (const b of o.beams ?? []) {
+        if (b.by === o.self.id || !Array.isArray(b.path) || b.path.length < 2) continue
+        const end = b.path[b.path.length - 1]
+        for (const tr of this.tracks.values()) {
+          if (tr.id === b.by || !tr.visible) continue
+          if (hyp(tr.x - end[0], tr.y - end[1]) < 4 && Math.abs(tr.z + 4.5 - end[2]) < 7) { this.ffaEvidence++; break }
+        }
+      }
+      for (const [id, hh] of this.hpHist) {
+        if (hh.length < 2) continue
+        const last = hh[hh.length - 1]
+        if (o.t - last.t > 0.2) continue
+        let first = hh[0]
+        for (const q of hh) if (last.t - q.t <= 3) { first = q; break }
+        const ourHit = this.ourHits.get(id)
+        if (first.hp - last.hp >= 150 && (ourHit === undefined || o.t - ourHit > 4) && o.zone && o.self.in_zone) {
+          this.ffaEvidence++
+          hh.length = 0
+        }
+      }
+    }
+    if (this.ffaEvidence >= 3 && this.ffaDetectedAt < 0) this.ffaDetectedAt = o.t
     const cut = o.t - 12
     while (this.dmgWindow.length && this.dmgWindow[0].t < cut) this.dmgWindow.shift()
     while (this.threatBearings.length && this.threatBearings[0].t < cut) this.threatBearings.shift()
@@ -480,6 +599,17 @@ export class Brain {
   }
 
   // ------------------------------------------------------------------ zone
+  projectIntoZone(o: any, p: number[], tau: number): number[] {
+    const c = this.zoneAt(o, this.t + tau)
+    const m = Math.min(6, c.r * 0.25)
+    const dx = p[0] - c.cx, dy = p[1] - c.cy
+    const d = hyp(dx, dy)
+    const lim = Math.max(0, c.r - m)
+    if (d <= lim) return p
+    if (d < 1e-6) return [c.cx, c.cy]
+    return [c.cx + (dx * lim) / d, c.cy + (dy * lim) / d]
+  }
+
   zoneUrgency(o: any, x: number, y: number, walk: number): { urgent: boolean; slack: number } {
     const zn = o.zone
     // slack = seconds of margin before the zone edge passes us, assuming we walk out now
@@ -600,7 +730,7 @@ export class Brain {
     const tq0 = performance.now()
     if (this.dfieldT < 0 || ((this.t - this.dfieldT > 0.5 || hyp(x - this.dfieldPos[0], y - this.dfieldPos[1]) > 4) && performance.now() < this.deadline - 3)) {
       const td = performance.now()
-      this.nav.distanceField(x, y, df, 60)
+      this.nav.distanceField(x, y, df, this.slow > 2 ? 40 : 60)
       this.mark("dfield", td)
       this.dfieldT = this.t
       this.dfieldPos = [x, y]
@@ -613,9 +743,10 @@ export class Brain {
       .slice(0, 4)
     const zfut = this.zoneAt(o, this.t + 8)
     const cands: Cand[] = []
-    const rings = evade ? [0, 8, 16, 26, 38, 52] : [0, 6, 12, 20, 30]
+    const vslow = this.slow > 4
+    const rings = vslow ? (evade ? [0, 10, 22, 36] : [0, 8, 16]) : evade ? [0, 8, 16, 26, 38, 52] : [0, 6, 12, 20, 30]
     for (const r of rings) {
-      const n = r === 0 ? 1 : r < 10 ? 8 : 10
+      const n = r === 0 ? 1 : vslow ? 8 : r < 10 ? 8 : 10
       for (let k = 0; k < n; k++) {
         const ang = (k * TAU) / n + (r % 2) * 0.2
         const px = x + Math.cos(ang) * r, py = y + Math.sin(ang) * r
@@ -628,11 +759,13 @@ export class Brain {
     }
     if (!cands.length) return [x, y]
     this.mark("cands", tq0)
+    const bearBuf = new Float64Array(8)
     let best = cands[0], bs = -Infinity
     const tEnd = Math.min(this.deadline, performance.now() + 3.5)
     for (const cd of cands) {
       if (performance.now() > tEnd) break
       let exp = 0, canHit = 0
+      let nb = 0
       for (const q of ths) {
         const tr = q.tr
         const dq = hyp(q.p[0] - cd.x, q.p[1] - cd.y)
@@ -641,10 +774,20 @@ export class Brain {
           const d = hyp(q.p[0] - cd.x, q.p[1] - cd.y)
           const w = (this.t - tr.lastSeen < 3 ? 1 : 0.5) * (d < 60 ? 1.4 : d < 150 ? 1 : 0.6)
           exp += w
+          bearBuf[nb++] = Math.atan2(q.p[1] - cd.y, q.p[0] - cd.x)
           if (target && tr.id === target.id) canHit = 1
         }
       }
       cd.exp = exp
+      // threats seeing us from opposite sides means rear hits (x1.5): penalize wide arcs
+      let arcPen = 0
+      if (nb >= 2) {
+        const bs2 = Array.from(bearBuf.subarray(0, nb)).sort((a, b) => a - b)
+        let gap = bs2[0] + TAU - bs2[nb - 1]
+        for (let i = 1; i < nb; i++) gap = Math.max(gap, bs2[i] - bs2[i - 1])
+        const arc = TAU - gap
+        if (arc > Math.PI * 0.9) arcPen = (arc - Math.PI * 0.9) * 2
+      }
       // zone: stay well inside the circle as it will be shortly (dominant term)
       const zd = zfut.r - hyp(cd.x - zfut.cx, cd.y - zfut.cy)
       const zMargin = Math.min(12, zfut.r * 0.3)
@@ -665,10 +808,46 @@ export class Brain {
           s -= Math.abs(d - pref) * 0.02
         }
       }
-      s += this.coverScore(cd.c) * 1.5
+      s += this.coverScore(cd.c) * 1.5 - (this.P.rearAware ? arcPen : 0)
       if (s > bs) { bs = s; best = cd }
     }
     return [best.x, best.y]
+  }
+
+  // a covered spot 50-110 m away from the recent threats, inside the zone a bit later
+  relocateSpot(o: any, threats: Track[]): number[] | null {
+    const [x, y, z] = o.self.pos
+    let cx = 0, cy = 0, wsum = 0
+    const recent = threats.filter((tr) => this.t - tr.lastSeen < 12)
+    for (const tr of recent) { const w = 1 / (1 + this.t - tr.lastSeen); cx += tr.x * w; cy += tr.y * w; wsum += w }
+    if (wsum <= 0) return null
+    cx /= wsum; cy /= wsum
+    const away = Math.atan2(y - cy, x - cx)
+    const zf = this.zoneAt(o, this.t + 20)
+    const ths = recent.sort((a, b) => hyp(a.x - x, a.y - y) - hyp(b.x - x, b.y - y)).slice(0, 4)
+    let best: number[] | null = null, bs = -Infinity
+    const tEnd = Math.min(this.deadline, performance.now() + 3)
+    for (const dist of [55, 85, 115]) {
+      for (const da of [0, -0.5, 0.5, -1.0, 1.0]) {
+        if (performance.now() > tEnd) break
+        const a = away + da
+        const c = this.nav.nearestMain(x + Math.cos(a) * dist, y + Math.sin(a) * dist, 14)
+        if (c < 0) continue
+        const px = this.nav.cx(c), py = this.nav.cy(c), pz = this.nav.z[c]
+        const zd = zf.r - hyp(px - zf.cx, py - zf.cy)
+        if (zd < Math.min(15, zf.r * 0.25)) continue
+        let s = this.coverScore(c) * 3 - Math.abs(da) * 0.8
+        let minD = Infinity
+        for (const tr of ths) {
+          const d = hyp(tr.x - px, tr.y - py)
+          minD = Math.min(minD, d)
+          if (d < 200 && this.w.sees(tr.x, tr.y, tr.z + 8, px, py, pz + 8.5, d > 45)) s -= 3
+        }
+        s += Math.min(150, minD) * 0.02
+        if (s > bs) { bs = s; best = [px, py] }
+      }
+    }
+    return best
   }
 
   preferredRange(o: any): number {
@@ -702,18 +881,37 @@ export class Brain {
     if (frac < 0.35 && d < 150) return true
     if (dropping && d < 160 && hpFrac > 0.4) return true
     if (nVisible === 1 && d < this.P.lonelyDuelRange && hpFrac > 0.6) return true
+    const engR = this.ffaEvidence >= 3 ? Math.min(this.P.engageRange, this.P.ffaEngageRange) : this.P.engageRange
+    if (nVisible <= 2 && d < engR && hpFrac > 0.45 && this.w.shotClear(x, y, z + 7, tr.x, tr.y, tr.z + 4.5)) return true
     return false
   }
 
   chooseTarget(o: any, visible: Track[]): Track | null {
     const [x, y, z] = o.self.pos
+    // directions of everyone actively shooting at us (visible or not): keep them in the front arc
+    const shooters: number[] = []
+    for (const tr of this.tracks.values()) if (this.t - tr.lastShotAtUs < 2.5 && this.t - tr.lastSeen < 6) shooters.push(Math.atan2(tr.y - y, tr.x - x))
+    const seenBy = new Set<number>()
+    for (let i = this.threatBearings.length - 1; i >= 0; i--) {
+      const b = this.threatBearings[i]
+      if (this.t - b.t >= 2) break
+      if (b.by !== null && this.tracks.has(b.by)) continue
+      const key = b.by ?? -1
+      if (seenBy.has(key)) continue // one entry per attacker, not per hit
+      seenBy.add(key)
+      shooters.push(b.b)
+    }
     let best: Track | null = null, bs = -Infinity
     for (const tr of visible) {
       const d = hyp(tr.x - x, tr.y - y)
       if (d > 260) continue
       let s = -d / 40 - (tr.hp / Math.max(1, tr.maxHp)) * 4
-      if (this.t - tr.lastShotAtUs < 2) s += 1.5
+      if (this.t - tr.lastShotAtUs < 2) s += 2.5
       if (tr.charging) s += 1
+      const yaw = Math.atan2(tr.y - y, tr.x - x)
+      let rear = 0
+      for (const b of shooters) if (Math.abs(wrap(b - yaw)) > Math.PI / 2 - 0.1) rear++
+      if (this.P.rearAware) s -= rear * 3
       // shootable?
       if (!this.w.shotClear(x, y, z + 7, tr.x, tr.y, tr.z + 4.5)) s -= 6
       if (s > bs) { bs = s; best = tr }
@@ -728,6 +926,11 @@ export class Brain {
     if (threats.some((tr) => this.t - tr.lastSeen < 6 && hyp(tr.x - x, tr.y - y) < 150)) {
       // only nearby cubes (e.g. after a kill) when nobody visible is close
       if (threats.some((tr) => tr.visible && hyp(tr.x - x, tr.y - y) < 90)) return null
+      // a valuable weapon close by (e.g. dropped by a kill)
+      for (const p of o.pickups ?? []) {
+        const [gain] = this.takeGain(me, p.kind)
+        if (gain >= 1.5 && hyp(p.pos[0] - x, p.pos[1] - y) < 32 && Math.abs(p.pos[2] - z) < 3) return [p.pos[0], p.pos[1]]
+      }
       let bc: number[] | null = null, bd = 28
       for (const c of o.cubes ?? []) {
         const d = hyp(c.pos[0] - x, c.pos[1] - y)
@@ -747,6 +950,16 @@ export class Brain {
       if (s > bs) { bs = s; best = [p.pos[0], p.pos[1]] }
     }
     if (best) return best
+    // supply drop: +cubes, full HP/energy, if it is close, on the ground or landing soon, and uncontested
+    for (const d of this.P.drops ? o.drops ?? [] : []) {
+      if (d.holder !== null && d.holder !== o.self.id) continue
+      const dd = hyp(d.pos[0] - x, d.pos[1] - y)
+      if (dd > 140 || d.lands_in > dd / 11 + 4) continue
+      if (hyp(d.pos[0] - zfut.cx, d.pos[1] - zfut.cy) > zfut.r - 8) continue
+      if (threats.some((tr) => this.t - tr.lastSeen < 10 && hyp(tr.x - d.pos[0], tr.y - d.pos[1]) < 120)) continue
+      const c = this.nav.nearestMain(d.pos[0], d.pos[1], 6)
+      if (c >= 0 && hyp(this.nav.cx(c) - d.pos[0], this.nav.cy(c) - d.pos[1]) < (d.radius ?? 8) - 2) return [this.nav.cx(c), this.nav.cy(c)]
+    }
     for (const c of o.cubes ?? []) {
       const d = hyp(c.pos[0] - x, c.pos[1] - y)
       if (d > 70 || Math.abs(c.pos[2] - z) > 3) continue
@@ -792,8 +1005,10 @@ export class Brain {
 
   pickUpgrade(choices: any[], me: any): number {
     let best = 0, bi = 999
+    // late game: the final zone bleeds everyone (armor does not help there), max HP decides
+    const prio = this.t > 300 ? ["plating", ...UPGRADE_PRIO.filter((u) => u !== "plating")] : UPGRADE_PRIO
     choices.forEach((c: any, i: number) => {
-      const k = UPGRADE_PRIO.indexOf(c.id)
+      const k = prio.indexOf(c.id)
       const r = k < 0 ? 500 : k
       if (r < bi) { bi = r; best = i }
     })
@@ -802,6 +1017,14 @@ export class Brain {
 
   // ------------------------------------------------------------------ movement
   directMode = false
+  scanStartYaw: number | null = null
+  ownsNav = false
+  ffaDetectedAt = -1
+  ffaEvidence = 0
+  ourHits = new Map<number, number>() // target id -> last time we hit it
+  relocTarget: number[] | null = null
+  relocUntil = 0
+  relocT = -99
   steer(o: any, dest: number[]): number[] {
     const [x, y] = o.self.pos
     const myC = this.nav.nearestWalkable(x, y, 6), dC = this.nav.nearestWalkable(dest[0], dest[1], 10)
@@ -824,7 +1047,8 @@ export class Brain {
       // keep the route inside the zone as it will be a little later (margin 4 m)
       const zf = this.zoneAt(o, this.t + Math.min(20, far / 11 + 3))
       const tp0 = performance.now()
-      this.path = this.nav.findPath(x, y, dest[0], dest[1], null, far > 250 ? 9000 : 5000, 1.3, [zf.cx, zf.cy, Math.max(0, zf.r - 4)])
+      const maxExp = this.slow > 4 ? 1200 : this.slow > 2 ? 2500 : far > 250 ? 9000 : 5000
+      this.path = this.nav.findPath(x, y, dest[0], dest[1], null, maxExp, 1.3, [zf.cx, zf.cy, Math.max(0, zf.r - 4)])
       const tpd = performance.now() - tp0
       if (tpd > 4 && (globalThis as any).__MF_SLOWLOG) (globalThis as any).__MF_SLOWLOG(`path ${tpd.toFixed(1)}ms exp=${this.nav.lastExpanded} from ${x.toFixed(0)},${y.toFixed(0)} to ${dest[0].toFixed(0)},${dest[1].toFixed(0)} len=${this.path?.length}`)
       this.pathGoal = dest.slice()
@@ -952,7 +1176,7 @@ export class Brain {
       const npc = this.aggroNpc(o)
       if (npc) { tgtPt = [npc.pos[0], npc.pos[1], npc.pos[2] + 1.75]; tgtVel = [npc.vel[0], npc.vel[1], 0]; tgtR = 1.8 }
       else { a.aim = [this.npcAggro.b, 0]; return }
-    } else if (this.P.lootNoise && !this.recovering && why !== "alert") {
+    } else if (this.P.lootNoise && o.t < this.P.lootNoiseUntil && !this.recovering && why !== "alert" && !threats.some((tr) => this.t - tr.lastSeen < 20)) {
       const npc = this.npcTarget(o, threats)
       if (npc) { tgtPt = [npc.pos[0], npc.pos[1], npc.pos[2] + 1.75]; tgtVel = [npc.vel[0], npc.vel[1], 0]; tgtR = 1.8 }
       else {
@@ -976,7 +1200,12 @@ export class Brain {
 
     const ox = x, oy = y, oz = z + muzH
     const dist = hyp(tgtPt[0] - ox, tgtPt[1] - oy, tgtPt[2] - oz)
-    const shotOk = this.w.shotClear(ox, oy, oz, tgtPt[0], tgtPt[1], tgtPt[2])
+    let shotOk = this.w.shotClear(ox, oy, oz, tgtPt[0], tgtPt[1], tgtPt[2])
+    if (!shotOk && isMech) {
+      // center hidden (low wall, ledge): try the upper body
+      const up = tgtPt[2] + 3.2 * (tgtR / 2.5)
+      if (this.w.shotClear(ox, oy, oz, tgtPt[0], tgtPt[1], up)) { tgtPt = [tgtPt[0], tgtPt[1], up]; shotOk = true; tgtR *= 0.6 }
+    }
 
     // gun lead
     const gs = slotGun >= 0 ? me.weapons[slotGun].stats?.speed ?? 252 : 252
@@ -999,7 +1228,7 @@ export class Brain {
     if (laserW && isMech && shotOk && dist < (laserW.stats?.range ?? 280) - 5) {
       const full = (laserW.charge ?? 0) >= (laserW.stats?.charge ?? 0.75) - 0.051
       if (laserW.cooldown <= 0.05) {
-        if (full || laserCharging) laserPriority = true
+        if (full) laserPriority = true
         const errL = Math.abs(wrap(curYaw - laserAim![0])) + Math.abs(curPitch - laserAim![1]) * 0.7
         if (full && errL < tol * 0.9) a.fire[slotLaser] = false // release now
         else a.fire[slotLaser] = true
@@ -1033,7 +1262,7 @@ export class Brain {
     if (slotGun >= 0 && shotOk && dist < (me.weapons[slotGun].stats?.range ?? 230) * 0.95) {
       const g = me.weapons[slotGun]
       const maxGunRange = isMech ? this.P.maxGunRange : 120
-      if (err < tol + slewTick * 0.25 && dist < maxGunRange && g.reload <= 0) a.fire[slotGun] = true
+      if (err < tol + slewTick * this.P.fireSlack && dist < maxGunRange && g.reload <= 0) a.fire[slotGun] = true
       if (g.ammo === 0 && g.reload <= 0) a.reload = true
     }
     if (slotLight >= 0 && shotOk) {
@@ -1067,7 +1296,7 @@ export class Brain {
   aggroNpc(o: any): any {
     const [x, y, z] = o.self.pos
     let best: any = null, bs = Infinity
-    for (const m of o.mechs) {
+    for (const m of o.mechs ?? []) {
       if (m.kind !== "npc") continue
       const d = hyp(m.pos[0] - x, m.pos[1] - y)
       let s = d
@@ -1083,7 +1312,7 @@ export class Brain {
     if (me.hp < me.max_hp * 0.7) return null
     if (threats.some((tr) => this.t - tr.lastSeen < 8 && hyp(tr.x - x, tr.y - y) < 160)) return null
     let best: any = null, bd = 75
-    for (const m of o.mechs) {
+    for (const m of o.mechs ?? []) {
       if (m.kind !== "npc") continue
       const d = hyp(m.pos[0] - x, m.pos[1] - y)
       if (d < bd && this.w.shotClear(x, y, me.pos[2] + 7, m.pos[0], m.pos[1], m.pos[2] + 1.75)) { bd = d; best = m }
@@ -1108,6 +1337,11 @@ export class Brain {
   lookDirection(o: any, threats: Track[]): number {
     const me = o.self
     const [x, y] = me.pos
+    // first seconds: sweep a full circle to spot nearby enemies and loot
+    if (o.t < 2.0 && threats.length === 0) {
+      if (this.scanStartYaw === null) this.scanStartYaw = me.aim[0]
+      return wrap(this.scanStartYaw + Math.min(TAU, (o.t + 0.15) * (me.stats?.turn_rate ?? 4)))
+    }
     // recent damage bearing first
     const lastB = this.threatBearings[this.threatBearings.length - 1]
     if (lastB && this.t - lastB.t < 3) return lastB.b

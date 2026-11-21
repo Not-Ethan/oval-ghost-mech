@@ -20,11 +20,12 @@ for (let c = 0; c < n; c++) {
   if (++cnt % 20000 === 0) console.error(`${cnt} cells, ${((Date.now() - t0) / 1000).toFixed(0)} s`)
 }
 const hash = mapHashOf(dir)
-saveCache(out, hash, { blockMax: w.blockMax, fz: nav.fz, clear: nav.clear, near, open })
+saveCache(out, hash, { blockMax: w.blockMax, fzQ: nav.fzQ, clearQ: nav.clearQ, comp: nav.comp, near, open })
 const back = loadCache(out, hash)
 if (!back) throw new Error("reload failed")
-// verify the cached nav reproduces walkability closely
-const nav2 = new Nav(w, 2.5, 9, 1.2, 50, { fz: back.fz, clear: back.clear })
+// verify the cached nav reproduces the computed one exactly
+const nav2 = new Nav(w, 2.5, 9, 1.2, 50, { fzQ: back.fzQ, clearQ: back.clearQ, comp: back.comp })
 let diff = 0
-for (let c = 0; c < n; c++) if (nav.walk[c] !== nav2.walk[c]) diff++
-console.error(`wrote ${out}: ${cnt} walkable of ${n} cells, walk diffs after quantization ${diff}, ${((Date.now() - t0) / 1000).toFixed(1)} s`)
+for (let c = 0; c < n; c++) if (nav.walk[c] !== nav2.walk[c] || nav.comp[c] !== nav2.comp[c] || nav.z[c] !== nav2.z[c]) diff++
+if (nav.mainComp !== nav2.mainComp) diff++
+console.error(`wrote ${out}: ${cnt} walkable of ${n} cells, cached-vs-computed cell diffs ${diff}, ${((Date.now() - t0) / 1000).toFixed(1)} s`)
