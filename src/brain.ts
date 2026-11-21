@@ -68,6 +68,7 @@ export const DEFAULT_PARAMS: Params = {
   fireSlack: 0.25,
   rearAware: false,
   drops: true,
+  pacifist: false,
 }
 
 export class Brain {
