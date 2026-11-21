@@ -26,9 +26,10 @@ async function makeBot(kind: string, paramsJson: string | undefined = args.param
   const mod = await import(args.brain ? new URL("../" + args.brain, import.meta.url).href : "../src/brain.ts")
   const b = new mod.Brain({ world: w, nav, debug: verbose && paramsJson === args.params, params: paramsJson ? JSON.parse(paramsJson) : {} })
   lastBrains.push(b)
-  return { name: "mine", squad: false, hello: (h: any) => { if (args.record) recLines.push(JSON.stringify(h)); b.hello(h) }, end: (m: any) => { if (args.record) recLines.push(JSON.stringify(m)) }, act: (o: any) => { if (args.record) recLines.push(JSON.stringify(o)); const r = b.act(o); if (verbose && b.dbg.length) console.log(b.dbg.join("\n")); return r } }
+  return { name: "mine", squad: false, hello: (h: any) => { if (args.record) recLines.push(JSON.stringify(h)); b.hello(h) }, end: (m: any) => { if (args.record) recLines.push(JSON.stringify(m)) }, act: (o: any) => { if (args.record) recLines.push(JSON.stringify(o)); let r: any; try { r = b.act(o) } catch (e) { brainErrors++; if (brainErrors <= 3) console.log("BRAIN EXCEPTION t=" + o.t + ": " + ((e as any)?.stack ?? e)); throw e } if (verbose && b.dbg.length) console.log(b.dbg.join("\n")); return r } }
 }
 
+let brainErrors = 0
 const scores: number[] = []
 const ffaB: number[] = []
 const lastBrains: any[] = []
@@ -135,6 +136,7 @@ for (let k = 0; k < N; k++) {
   const hk = res.places.map((p, i) => i).filter((i) => !ours.includes(i))
   console.log(`match ${k} seed ${seed}: place ${ours.map((i) => res.places[i]).join(",")} kills ${ours.map((i) => res.kills[i]).join(",")} death ${ours.map((i) => res.deathT[i].toFixed(0)).join(",")} dealt ${res.dmgDealt[i0]} taken ${res.dmgTaken[i0]} | end t=${res.t.toFixed(0)} houseDead=${hk.filter((i) => res.deathT[i] >= 0).length} acc ${res.acc[i0]} houseAcc ${hk.map((i) => res.acc[i]).filter((a) => !a.startsWith('0/0')).slice(0, 4).join(' ')} (${(ms / 1000).toFixed(1)}s) act avg ${avgMs.toFixed(2)}ms max ${maxMs.toFixed(1)}ms`)
 }
+if (brainErrors) console.log(`BRAIN EXCEPTIONS: ${brainErrors}`)
 if (args.trace) writeFileSync(args.trace, JSON.stringify(traceOut))
 if (args.record) { writeFileSync(args.record, gzipSync(recLines.join("\n") + "\n")); console.log(`recorded ${recLines.length} lines to ${args.record}`) }
 const mean = scores.reduce((a, b) => a + b, 0) / scores.length
