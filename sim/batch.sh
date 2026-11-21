@@ -7,7 +7,7 @@ NAME=$1; BOT=$2; N=$3; S=$4; W=${5:-4}; shift 5
 cd "$(dirname "$0")/.."
 OUT=${OUT:-${TMPDIR:-/tmp}/mr}
 mkdir -p "$OUT"
-rm -f "$OUT/$NAME.txt" "$OUT/$NAME.jsonl" "$OUT/$NAME".w*.txt
+rm -f "$OUT/$NAME.txt" "$OUT/$NAME.jsonl" "$OUT/$NAME".w*.txt "$OUT/$NAME".w*.jsonl
 PER=$(( (N + W - 1) / W ))
 for i in $(seq 0 $((W-1))); do
   s=$((S + i*PER)); n=$PER

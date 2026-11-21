@@ -115,6 +115,7 @@ export type Params = {
   scoutT: number // until this match time, with no laser known and no enemy visible: walk to the most open spot within ~60 m and sweep (0 = off)
   leadMC: boolean // gun lead from sampled strafe futures (pooled reversal intervals, time since the target's last reversal, accel limit); aim at the window with the most samples
   fireMinP: number // with leadMC: fire the gun only when the estimated hit chance of the shot is at least this (0 = off)
+  leadMCMean: boolean // leadMC aims at the mean of the sampled futures instead of the densest window
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -176,6 +177,7 @@ export const DEFAULT_PARAMS: Params = {
   scoutT: 0,
   leadMC: false,
   fireMinP: 0,
+  leadMCMean: false,
 }
 
 export class Brain {
@@ -1787,7 +1789,8 @@ export class Brain {
       const n = i - j + 1
       if (n > bestN) { bestN = n; bestC = (xs[i] + xs[j]) / 2 }
     }
-    const lat = bestC
+    let lat = bestC
+    if (this.P.leadMCMean) { let m = 0; for (let i = 0; i < K; i++) m += xs[i]; lat = m / K }
     const pt = [p[0] + ux * vr * tf + lx * lat, p[1] + uy * vr * tf + ly * lat, p[2] + clamp(v[2], -3, 3) * tf * 0.3]
     return { pt, p: bestN / K }
   }
