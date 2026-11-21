@@ -36,6 +36,12 @@ const LOADOUTS: Record<string, Record<string, number>> = {
     "gun+laser": 7, "gun+lightning": 6.5, "gun+mortar": 3.5,
     "laser+lightning": 9, "laser+mortar": 4.5, "lightning+mortar": 4,
   },
+  // like "gun", but never carry a mortar: an enemy laser does +60% (cook-off) to a mech holding one
+  nomortar: {
+    "+": 0, "+gun": 1, "+laser": 2.5, "+lightning": 2, "+mortar": 0.5,
+    "gun+laser": 9, "gun+lightning": 6, "gun+mortar": 0.8,
+    "laser+lightning": 7, "laser+mortar": 2, "lightning+mortar": 1.5,
+  },
   // keep the gun: house hunters fight from ~65-100 m, outside lightning range
   gun: {
     "+": 0, "+gun": 1, "+laser": 2.5, "+lightning": 2, "+mortar": 1,
@@ -101,6 +107,8 @@ export type Params = {
   dropR: number // ... within this distance
   laserCrates: boolean // no laser held or known: break remembered ground crates within 150 m (1 in 6 holds a laser)
   harvestW: boolean // harvest also goes for a laser dropped at the kill spot when we hold none (needs lootMem)
+  laserRoof: number // laserHunt also targets lasers on roofs up to this many metres above our feet (0 = ground only); jets up
+  regenHold: number // below this HP fraction start no new opportunistic fights and shoot no crates/drones, so regen can start (0 = off)
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -154,6 +162,8 @@ export const DEFAULT_PARAMS: Params = {
   dropR: 220,
   laserCrates: false,
   harvestW: false,
+  laserRoof: 0,
+  regenHold: 0,
 }
 
 export class Brain {
@@ -1043,7 +1053,7 @@ export class Brain {
     const d = hyp(tr.x - x, tr.y - y)
     if (this.t - tr.lastShotAtUs < (this.P.attackersOnly ? 10 : 6)) return true
     if (d < 50) return true
-    if (this.P.attackersOnly) {
+    if (this.P.attackersOnly || (this.P.regenHold > 0 && o.self.hp / (o.self.max_hp || 1400) < this.P.regenHold)) {
       const b = Math.atan2(y - tr.y, x - tr.x)
       return tr.charging && Math.abs(wrap(tr.aimYaw - b)) < 0.2 && d < 290
     }
@@ -1060,6 +1070,7 @@ export class Brain {
     const d = hyp(tr.x - x, tr.y - y)
     const frac = tr.hp / Math.max(1, tr.maxHp)
     if (this.P.attackersOnly) return frac < 0.35 && d < 150
+    if (this.P.regenHold > 0 && hpFrac < this.P.regenHold) return frac < 0.35 && d < 150
     if (this.P.laserEngageR > 0 && d < this.P.laserEngageR && hpFrac > 0.4 && o.self.weapons.some((w: any) => w && w.kind === "laser") && this.w.shotClear(x, y, z + 7, tr.x, tr.y, tr.z + 4.5)) return true
     // being damaged by someone else (third party)?
     const hist = this.hpHist.get(tr.id)
@@ -1155,7 +1166,8 @@ export class Brain {
     let best: number[] | null = null, bd = this.P.laserR
     for (const p of this.pickMem.values()) {
       if (p.kind !== "laser") continue
-      if (Math.abs(p.pos[2] - this.nav.surfAt(p.pos[0], p.pos[1])) > 2.5) continue
+      const roof = Math.abs(p.pos[2] - this.nav.surfAt(p.pos[0], p.pos[1])) > 2.5
+      if (roof && !(this.P.laserRoof > 0 && p.pos[2] - z < this.P.laserRoof && (o.self.energy ?? 0) > 60)) continue
       if (hyp(p.pos[0] - zf.cx, p.pos[1] - zf.cy) > zf.r - 10) continue
       const d = hyp(p.pos[0] - x, p.pos[1] - y)
       if (d < bd) { bd = d; best = [p.pos[0], p.pos[1]] }
@@ -1545,7 +1557,7 @@ export class Brain {
       else { a.aim = [this.npcAggro.b, 0]; return }
     } else if (why === "lcrate" && this.crateGoal) {
       tgtPt = [this.crateGoal.x, this.crateGoal.y, this.crateGoal.z + 1.2]; tgtR = 1.4
-    } else if (this.P.lootNoise && (o.t < this.P.lootNoiseUntil || (this.P.farm && (me.cubes ?? 0) < this.P.farmMaxCubes)) && !this.recovering && why !== "alert" && !threats.some((tr) => this.t - tr.lastSeen < (this.P.farm ? this.P.farmQuiet : 20))) {
+    } else if (this.P.lootNoise && !(this.P.regenHold > 0 && me.hp / (me.max_hp || 1400) < this.P.regenHold) && (o.t < this.P.lootNoiseUntil || (this.P.farm && (me.cubes ?? 0) < this.P.farmMaxCubes)) && !this.recovering && why !== "alert" && !threats.some((tr) => this.t - tr.lastSeen < (this.P.farm ? this.P.farmQuiet : 20))) {
       const npc = this.npcTarget(o, threats)
       if (npc) { tgtPt = [npc.pos[0], npc.pos[1], npc.pos[2] + 1.75]; tgtVel = [npc.vel[0], npc.vel[1], 0]; tgtR = 1.8 }
       else {
