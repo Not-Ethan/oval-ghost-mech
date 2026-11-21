@@ -125,6 +125,9 @@ export type Params = {
   chaseHp: number // pursue a wounded enemy (HP fraction below this) that broke line of sight, to finish it before it regenerates (0 = off)
   gunLaserSync: boolean // while the torso swings to the laser's release point, hold the gun if its lead point is more than ~1 target radius away
   targetRear: boolean // with targetHit: an enemy facing away (we are outside its front arc) takes x1.5 damage, so its time to kill is shorter
+  laserFinish: boolean // release a partial laser charge as soon as it would kill the (aligned) target
+  laserReady: boolean // target had a clear shot within 1.5 s but not now: keep the laser charged and aimed at it, release when it reappears
+  mortarLob: boolean // tracked target behind cover: lob the mortar on a high arc that clears the geometry (checked along the trajectory)
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -196,6 +199,9 @@ export const DEFAULT_PARAMS: Params = {
   chaseHp: 0,
   gunLaserSync: false,
   targetRear: false,
+  laserFinish: false,
+  laserReady: false,
+  mortarLob: false,
 }
 
 export class Brain {
@@ -221,6 +227,7 @@ export class Brain {
   crateGoal: any = null
   scoutSpot: number[] | null = null
   flipIntervals: number[] = []
+  lastClearShot = new Map<number, number>()
   scoutSweepT = -1
   sweepYaw0 = 0
   lastTargetT = -99
@@ -1704,6 +1711,7 @@ export class Brain {
 
     const ox = x, oy = y, oz = z + muzH
     const dist = hyp(tgtPt[0] - ox, tgtPt[1] - oy, tgtPt[2] - oz)
+    if (target && isMech && this.w.shotClear(ox, oy, oz, tgtPt[0], tgtPt[1], tgtPt[2])) this.lastClearShot.set(target.id, this.t)
     let shotOk = this.w.shotClear(ox, oy, oz, tgtPt[0], tgtPt[1], tgtPt[2])
     if (!shotOk && isMech) {
       // center hidden (low wall, ledge): try the upper body
@@ -1743,15 +1751,33 @@ export class Brain {
 
     // laser logic: charge while target in range & shootable, release when full and aligned
     let laserPriority = false
+    let readyAim = false
     if (laserW && isMech && shotOk && dist < (laserW.stats?.range ?? 280) - 5) {
       const full = (laserW.charge ?? 0) >= (laserW.stats?.charge ?? 0.75) - 0.051
       if (laserW.cooldown <= 0.05) {
         if (full) laserPriority = true
         const errL = Math.abs(wrap(curYaw - laserAim![0])) + Math.abs(curPitch - laserAim![1]) * 0.7
-        if (full && errL < tol * 0.9) a.fire[slotLaser] = false // release now
+        // a partial charge that already kills the target: release it now rather than let the kill escape
+        let finish = false
+        const lst = laserW.stats ?? this.wcfg("laser")
+        if (this.P.laserFinish && target && (laserW.charge ?? 0) >= (lst.min_charge ?? 0.15)) {
+          const mf = lst.min_frac ?? 0.35
+          const frac = mf + (1 - mf) * Math.min(1, (laserW.charge ?? 0) / (lst.charge ?? 0.75))
+          const scale = 1 + (this.cfg?.cubes?.damage_per_cube ?? 0.04) * Math.min(me.cubes ?? 0, this.cfg?.cubes?.stat_cap ?? 10)
+          const cook = target.weapons?.includes("mortar") ? 1 + (lst.cookoff ?? 0.6) : 1
+          if (target.hp <= (lst.damage ?? 315) * frac * scale * cook * 0.95) { finish = true; laserPriority = true }
+        }
+        if ((full || finish) && errL < tol * 0.9) a.fire[slotLaser] = false // release now
         else a.fire[slotLaser] = true
         // early release if the target is about to break line (low streak) - keep simple
       }
+    } else if (this.P.laserReady && laserW && isMech && target && laserW.cooldown <= 0.05 && dist < (laserW.stats?.range ?? 280) - 5 && this.t - (this.lastClearShot.get(target.id) ?? -99) < 1.5) {
+      // the target just lost line of sight (peeking or ducking): charge and hold, aimed at it, so the beam is ready the
+      // moment it reappears; a full charge auto-fires after hold_s, so let go just before that
+      const fullC = (laserW.charge ?? 0) >= (laserW.stats?.charge ?? 0.75) - 0.051
+      const tooLong = fullC && this.laserFullSince >= 0 && this.t - this.laserFullSince > (laserW.stats?.hold_s ?? 2) - 0.35
+      a.fire[slotLaser] = !tooLong
+      readyAim = true
     } else if (laserCharging) {
       const fullC = (laserW.charge ?? 0) >= (laserW.stats?.charge ?? 0.75) - 0.051
       a.fire[slotLaser] = laserW && (laserW.charge ?? 0) < (laserW.stats?.charge ?? 0.75) // keep charging a bit if target lost briefly
@@ -1761,6 +1787,7 @@ export class Brain {
     }
 
     let gunHold = false
+    if (readyAim && laserAim) { aimYaw = laserAim[0]; aimPitch = laserAim[1] }
     if (laserPriority && laserAim) {
       if (this.P.gunLaserSync) {
         // angular gap between the gun's lead point and the laser point, compared with the target's angular radius
@@ -1788,6 +1815,17 @@ export class Brain {
         }
         if (sol && (slotGun < 0 || this.P.mortarUse)) { aimYaw = sol[0]; aimPitch = sol[1]; mortarAiming = slotGun >= 0 }
         if (sol && Math.abs(wrap(curYaw - sol[0])) < 0.03 && Math.abs(curPitch - sol[1]) < 0.03) a.fire[slotMortar] = true
+      }
+    }
+    if (this.P.mortarLob && !laserPriority && slotMortar >= 0 && isMech && target && !shotOk) {
+      const mw = me.weapons[slotMortar]
+      const hd0 = hyp(tgtPt[0] - x, tgtPt[1] - y)
+      if (mw.cooldown <= 0 && hd0 > 30 && hd0 < 210) {
+        const lob = this.lobSolve(x, y, z + (st.height ?? 9) + 0.5, tgtPt, tgtVel, mw.stats?.speed ?? 72, mw.stats?.gravity ?? 22)
+        if (lob) {
+          aimYaw = lob[0]; aimPitch = lob[1]; mortarAiming = true
+          if (Math.abs(wrap(curYaw - lob[0])) < 0.03 && Math.abs(curPitch - lob[1]) < 0.03) a.fire[slotMortar] = true
+        }
       }
     }
     a.aim = [aimYaw, clamp(aimPitch, st.min_pitch ?? -0.7, st.max_pitch ?? 1.3)]
@@ -1882,6 +1920,40 @@ export class Brain {
       tz = p[2] + clamp(v[2], -3, 3) * tf * 0.3
     }
     return [tx, ty, tz]
+  }
+
+  // High-arc mortar solution onto a target we cannot see, leading it by a damped share of its velocity (the shell is in
+  // the air for seconds); null unless the sampled trajectory clears the world until close to the impact point.
+  lobSolve(ox: number, oy: number, oz: number, p: number[], v: number[], speed: number, g: number): number[] | null {
+    let tx = p[0], ty = p[1]
+    const tz = p[2] - 3.5
+    let sol: number[] | null = null
+    for (let it = 0; it < 3; it++) {
+      const hd = hyp(tx - ox, ty - oy), hz = tz - oz
+      const disc = speed ** 4 - g * (g * hd * hd + 2 * hz * speed * speed)
+      if (disc < 0 || hd < 1) return null
+      const th = Math.atan((speed * speed + Math.sqrt(disc)) / (g * hd))
+      if (th > (this.cfg?.mech?.max_pitch ?? 1.3) - 0.02) return null
+      sol = [Math.atan2(ty - oy, tx - ox), th]
+      const tf = hd / Math.max(1, speed * Math.cos(th))
+      tx = p[0] + v[0] * tf * 0.4; ty = p[1] + v[1] * tf * 0.4
+    }
+    if (!sol) return null
+    // sample the parabola from the shot origin (3 m out along the aim) and check each segment against the world
+    const cy = Math.cos(sol[0]), sy = Math.sin(sol[0]), cp = Math.cos(sol[1]), sp = Math.sin(sol[1])
+    let px = ox + cy * cp * 3, py = oy + sy * cp * 3, pz = oz + sp * 3
+    const vx = cy * cp * speed, vy = sy * cp * speed, vz0 = sp * speed
+    const hd = hyp(tx - ox, ty - oy)
+    const tEnd = hd / Math.max(1, speed * cp)
+    const N = 18
+    for (let i = 1; i <= N; i++) {
+      const t = (tEnd * i) / N
+      const nx = ox + cy * cp * 3 + vx * t, ny = oy + sy * cp * 3 + vy * t, nz = oz + sp * 3 + vz0 * t - 0.5 * g * t * t
+      const near = hyp(nx - tx, ny - ty) < 10
+      if (!near && this.w.raycast(px, py, pz, nx, ny, nz, false) < 1) return null
+      px = nx; py = ny; pz = nz
+    }
+    return sol
   }
 
   mortarSolve(ox: number, oy: number, oz: number, tx: number, ty: number, tz: number, v: number, g: number): number[] | null {
