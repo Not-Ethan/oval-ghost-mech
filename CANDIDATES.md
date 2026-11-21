@@ -100,6 +100,13 @@ with about 3 repeats each.
    **B1 minus the movement items** (kite, chase) ×3, to see whether movement is what hurts.
 3. Runs 7–12: the commit with the best 3-run mean, repeated for the best single run.
 
+| # | Commit | What | Sim vs C2 (200 paired seeds) | Runs wanted |
+| --- | --- | --- | --- | --- |
+| 14 (B1) | 8cfcb86 | C2 + leadAdapt, targetHit, chaseHp 0.35, laserNear 0 / laserHp 0.25, harvestMaxVis 0, upg mag, kite 2, finishHp 0.3, laserFinish | +0.22 ± 0.17 (M1), +0.12 ± 0.17 (M1s); M1b pending | **3**. Expected real gain about +0.2–0.4 over C2's ~4.3 (sim × the 1.3–2× seen for C1/C2). That may not be enough for 5.33 on its own. |
+
+Excluded from B1 because they were negative or mixed in the sim: smartReload, gunLaserSync, targetRear, laserReady
+(−0.07 / −0.04 on C13), rangeW, longer range, juke changes, expW, scouting, laserCrates.
+
 ## Built on C10 (real 4.71 / 3.88): kill conversion
 
 Real results for C7–C10: C7 kite 4.29, C8 longer range 4.27, C9 exposure weight 4.38, **C10
