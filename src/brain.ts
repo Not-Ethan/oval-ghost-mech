@@ -123,6 +123,7 @@ export type Params = {
   prefLtg: number // preferred fighting range with lightning
   smartReload: boolean // reload during gaps: target not shootable / out of gun range with half a magazine or less, or nobody visible and not full
   chaseHp: number // pursue a wounded enemy (HP fraction below this) that broke line of sight, to finish it before it regenerates (0 = off)
+  gunLaserSync: boolean // while the torso swings to the laser's release point, hold the gun if its lead point is more than ~1 target radius away
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -192,6 +193,7 @@ export const DEFAULT_PARAMS: Params = {
   prefLtg: 35,
   smartReload: false,
   chaseHp: 0,
+  gunLaserSync: false,
 }
 
 export class Brain {
@@ -1751,7 +1753,15 @@ export class Brain {
       if (!target) a.fire[slotLaser] = false
     }
 
-    if (laserPriority && laserAim) { aimYaw = laserAim[0]; aimPitch = laserAim[1] }
+    let gunHold = false
+    if (laserPriority && laserAim) {
+      if (this.P.gunLaserSync) {
+        // angular gap between the gun's lead point and the laser point, compared with the target's angular radius
+        const gap = Math.abs(wrap(aimYaw - laserAim[0])) + Math.abs(aimPitch - laserAim[1]) * 0.7
+        if (gap > Math.atan2(tgtR, dist)) gunHold = true
+      }
+      aimYaw = laserAim[0]; aimPitch = laserAim[1]
+    }
     // mortar: only for slow/stationary targets at mid range when no laser in progress
     let mortarAiming = false
     if (!laserPriority && slotMortar >= 0 && isMech && dist > 25 && dist < 220 && (!this.P.mortarUse || shotOk)) {
@@ -1785,7 +1795,7 @@ export class Brain {
     if (slotGun >= 0 && shotOk && dist < (me.weapons[slotGun].stats?.range ?? 230) * 0.95) {
       const g = me.weapons[slotGun]
       const maxGunRange = isMech ? this.P.maxGunRange : 120
-      if (err < tol + slewTick * this.P.fireSlack && dist < maxGunRange && g.reload <= 0 && !mortarAiming && !(isMech && this.P.fireMinP > 0 && hitP < this.P.fireMinP)) a.fire[slotGun] = true
+      if (err < tol + slewTick * this.P.fireSlack && dist < maxGunRange && g.reload <= 0 && !mortarAiming && !gunHold && !(isMech && this.P.fireMinP > 0 && hitP < this.P.fireMinP)) a.fire[slotGun] = true
       if (g.ammo === 0 && g.reload <= 0) a.reload = true
     }
     if (this.P.smartReload && slotGun >= 0 && isMech) {
